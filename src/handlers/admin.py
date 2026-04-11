@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import io
 import sqlite3
+
 from aiogram import F, Router
-from aiogram.filters import BaseFilter, Command
+from aiogram.filters import BaseFilter, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     BufferedInputFile,
@@ -15,12 +16,12 @@ from aiogram.types import (
 
 from .. import db
 from ..config import Settings
-from ..menu_parse import parse_docx_bytes
 from ..jobs import (
     send_monthly_report_previous,
     test_broadcast_menu_now,
     test_broadcast_orders_closed,
 )
+from ..menu_parse import parse_docx_bytes
 from ..reports import (
     aggregate_daily_canteen,
     build_canteen_csv_bytes,
@@ -34,6 +35,7 @@ from ..timeutil import (
 )
 from .common import admin_main_kb, is_admin
 from .registration import RegStates
+from .states import AdminStates
 
 router = Router(name="admin")
 
@@ -51,62 +53,6 @@ class IsAdminCb(BaseFilter):
 class IsTestMode(BaseFilter):
     async def __call__(self, message: Message, settings: Settings) -> bool:
         return settings.test_mode
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_menu"))
-async def cmd_test_menu(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    """Тест: разослать меню на сегодня всем (как утренняя рассылка), без ожидания cron."""
-    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=None)
-    await message.answer(report)
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_menu_me"))
-async def cmd_test_menu_me(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    """Тест: прислать меню только вам."""
-    uid = message.from_user.id if message.from_user else 0
-    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=uid)
-    await message.answer(report)
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_closed"))
-async def cmd_test_closed(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    """Тест: считать дедлайн прошедшим + разослать сообщение «заказы закрыты»."""
-    set_test_deadline_override(True)
-    report = await test_broadcast_orders_closed(message.bot, conn, settings)
-    await message.answer(
-        "Режим теста: дедлайн для заказов считается пройденным.\n" + report
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_open"))
-async def cmd_test_open(message: Message) -> None:
-    """Тест: принудительно разрешить оформлять заказ (игнорировать дедлайн по времени)."""
-    set_test_deadline_override(False)
-    await message.answer(
-        "Режим теста: дедлайн считается НЕ наступившим — можно оформлять заказ (до /test_reset)."
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_weekday_on"))
-async def cmd_test_weekday_on(message: Message) -> None:
-    """Тест в выходной: вести себя как в будний день для приёма заказов."""
-    set_test_weekday_override(True)
-    await message.answer("Режим теста: «сегодня будний день» для заказов (до /test_reset).")
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_weekday_off"))
-async def cmd_test_weekday_off(message: Message) -> None:
-    """Тест: считать сегодня выходным (заказы недоступны)."""
-    set_test_weekday_override(False)
-    await message.answer("Режим теста: «сегодня выходной» для заказов (до /test_reset).")
-
-
-@router.message(IsAdmin(), IsTestMode(), Command("test_reset"))
-async def cmd_test_reset(message: Message) -> None:
-    """Сбросить тестовые режимы дедлайна и буднего дня — снова реальное время."""
-    set_test_deadline_override(None)
-    set_test_weekday_override(None)
-    await message.answer("Тестовые переопределения сброшены: дедлайн и день недели снова по часам и календарю.")
 
 
 class IsNotTestMode(BaseFilter):
@@ -132,34 +78,45 @@ async def test_commands_disabled_hint(message: Message) -> None:
     )
 
 
-@router.message(IsAdmin(), Command("admin"))
-async def cmd_admin_panel(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    uid = message.from_user.id if message.from_user else 0
+def _parse_fio(text: str) -> tuple[str, str] | None:
+    parts = text.split()
+    if len(parts) < 2:
+        return None
+    return parts[0], parts[1]
+
+
+def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) -> str:
     emp = db.get_employee_by_tg(conn, uid)
     if emp:
         bind_hint = (
             f"Вы привязаны как {emp.last_name} {emp.first_name}.\n"
-            "Заказ оформляется обычными кнопками: «Заказ на сегодня» / «Корзина»."
+            "Заказ — кнопками «Заказ на сегодня» и «Корзина»."
         )
     else:
         bind_hint = (
-            "Для заказа еды сначала добавьте/привяжите себя как сотрудника:\n"
-            "1) /add_employee Фамилия Имя\n"
-            "2) «Привязка для заказа»."
+            "Для заказа еды сначала добавьте себя в список («Добавить сотрудника») "
+            "и выполните «Привязка для заказа»."
         )
     test_block = ""
     if settings.test_mode:
         test_block = (
-            "\nРежим TEST_MODE: заказы в выходные и в любое время; команды "
-            "/test_menu, /test_menu_me, /test_closed, /test_open, "
-            "/test_weekday_on, /test_weekday_off, /test_reset.\n"
+            "\nРежим TEST_MODE: заказы в выходные и в любое время; тестовые кнопки внизу клавиатуры.\n"
         )
-    await message.answer(
-        "Админ-панель открыта.\n\n"
-        "Разделы: сотрудники, загрузка меню, сводка столовой, месячный отчёт."
+    return (
+        "Админ-панель.\n\n"
+        "Сотрудники и меню — через кнопки ниже."
         f"{test_block}\n"
-        f"{bind_hint}",
-        reply_markup=admin_main_kb(),
+        f"{bind_hint}"
+    )
+
+
+@router.message(IsAdmin(), F.text == "Админ-панель")
+async def admin_panel(message: Message, conn: sqlite3.Connection, settings: Settings, state: FSMContext) -> None:
+    await state.clear()
+    uid = message.from_user.id if message.from_user else 0
+    await message.answer(
+        _admin_panel_text(conn, uid, settings),
+        reply_markup=admin_main_kb(settings),
     )
 
 
@@ -173,43 +130,36 @@ async def admin_bind_for_order(
     if db.get_employee_by_tg(conn, uid):
         await message.answer(
             "Telegram уже привязан к сотруднику — заказывайте через «Заказ на сегодня». "
-            "Сброс привязки: /unlink_employee Фамилия Имя."
+            "Снять привязку можно кнопкой «Снять привязку»."
         )
         return
     await state.set_state(RegStates.waiting_name)
     await message.answer(
         "Введите фамилию и имя через пробел (как в списке).\n"
-        "Если вас ещё нет в списке — сначала /add_employee Фамилия Имя."
+        "Если вас ещё нет в списке — сначала нажмите «Добавить сотрудника»."
     )
 
 
-@router.message(IsAdmin(), F.text == "Сотрудники")
-async def admin_employees_help(message: Message) -> None:
+@router.message(IsAdmin(), F.text == "Добавить сотрудника")
+async def admin_prompt_add(message: Message, state: FSMContext, settings: Settings) -> None:
+    await state.set_state(AdminStates.waiting_add_fio)
     await message.answer(
-        "Управление сотрудниками (только для админа):\n"
-        "• /add_employee Фамилия Имя\n"
-        "  (как при первом входе сотрудника в бота)\n"
-        "• /list_employees\n"
-        "• /unlink_employee Фамилия Имя\n"
-        "• /deactivate_employee Фамилия Имя\n",
-        reply_markup=admin_main_kb(),
+        "Введите фамилию и имя нового сотрудника через пробел.\n"
+        "Пример: Иванов Иван",
+        reply_markup=admin_main_kb(settings),
     )
 
 
-def _parse_fio(text: str) -> tuple[str, str] | None:
-    parts = text.split()
-    if len(parts) < 2:
-        return None
-    return parts[0], parts[1]
-
-
-@router.message(IsAdmin(), Command("add_employee"))
-async def cmd_add_employee(message: Message, conn: sqlite3.Connection) -> None:
-    raw = message.text or ""
-    payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
-    parsed = _parse_fio(payload.strip())
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_add_fio), F.text, ~F.text.startswith("/"))
+async def admin_do_add(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    parsed = _parse_fio((message.text or "").strip())
     if not parsed:
-        await message.answer("Формат: /add_employee Фамилия Имя")
+        await message.answer("Нужно два слова: Фамилия Имя.")
         return
     last_name, first_name = parsed
     try:
@@ -217,14 +167,15 @@ async def cmd_add_employee(message: Message, conn: sqlite3.Connection) -> None:
     except sqlite3.IntegrityError:
         await message.answer("Такой сотрудник уже есть (ФИО должно быть уникальным).")
         return
-    await message.answer(f"Сотрудник добавлен, id={eid}.")
+    await state.clear()
+    await message.answer(f"Сотрудник добавлен, id={eid}.", reply_markup=admin_main_kb(settings))
 
 
-@router.message(IsAdmin(), Command("list_employees"))
-async def cmd_list_employees(message: Message, conn: sqlite3.Connection) -> None:
+@router.message(IsAdmin(), F.text == "Список сотрудников")
+async def admin_list_employees(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     rows = db.list_employees(conn, active_only=False)
     if not rows:
-        await message.answer("Список пуст.")
+        await message.answer("Список пуст.", reply_markup=admin_main_kb(settings))
         return
     lines = []
     for r in rows:
@@ -238,44 +189,133 @@ async def cmd_list_employees(message: Message, conn: sqlite3.Connection) -> None
     text = "\n".join(lines)
     part = 3500
     for i in range(0, len(text), part):
-        await message.answer(text[i : i + part])
+        await message.answer(text[i : i + part], reply_markup=admin_main_kb(settings) if i + part >= len(text) else None)
 
 
-@router.message(IsAdmin(), Command("unlink_employee"))
-async def cmd_unlink(message: Message, conn: sqlite3.Connection) -> None:
-    raw = message.text or ""
-    payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
-    parts = payload.split()
+@router.message(IsAdmin(), F.text == "Снять привязку")
+async def admin_prompt_unlink(message: Message, state: FSMContext, settings: Settings) -> None:
+    await state.set_state(AdminStates.waiting_unlink_fio)
+    await message.answer(
+        "Введите фамилию и имя сотрудника, у которого сбросить привязку Telegram.",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_unlink_fio), F.text, ~F.text.startswith("/"))
+async def admin_do_unlink(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.answer("Формат: /unlink_employee Фамилия Имя")
+        await message.answer("Нужно: Фамилия Имя.")
         return
     emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
     if not emp:
         await message.answer("Не найден.")
         return
     db.unlink_employee_telegram(conn, emp.id)
-    await message.answer("Привязка Telegram сброшена.")
+    await state.clear()
+    await message.answer("Привязка Telegram сброшена.", reply_markup=admin_main_kb(settings))
 
 
-@router.message(IsAdmin(), Command("deactivate_employee"))
-async def cmd_deactivate(message: Message, conn: sqlite3.Connection) -> None:
-    raw = message.text or ""
-    payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
-    parts = payload.split()
+@router.message(IsAdmin(), F.text == "Отключить сотрудника")
+async def admin_prompt_deactivate(message: Message, state: FSMContext, settings: Settings) -> None:
+    await state.set_state(AdminStates.waiting_deactivate_fio)
+    await message.answer(
+        "Введите фамилию и имя сотрудника для отключения.",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_deactivate_fio), F.text, ~F.text.startswith("/"))
+async def admin_do_deactivate(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.answer("Формат: /deactivate_employee Фамилия Имя")
+        await message.answer("Нужно: Фамилия Имя.")
         return
     emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
     if not emp:
         await message.answer("Не найден.")
         return
     db.deactivate_employee(conn, emp.id)
-    await message.answer("Сотрудник отключён.")
+    await state.clear()
+    await message.answer("Сотрудник отключён.", reply_markup=admin_main_kb(settings))
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню всем")
+async def btn_test_menu_all(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=None)
+    await message.answer(report, reply_markup=admin_main_kb(settings))
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню мне")
+async def btn_test_menu_me(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    uid = message.from_user.id if message.from_user else 0
+    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=uid)
+    await message.answer(report, reply_markup=admin_main_kb(settings))
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: закрыть заказы")
+async def btn_test_closed(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    set_test_deadline_override(True)
+    report = await test_broadcast_orders_closed(message.bot, conn, settings)
+    await message.answer(
+        "Режим теста: дедлайн для заказов считается пройденным.\n" + report,
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: открыть заказы")
+async def btn_test_open(message: Message, settings: Settings) -> None:
+    set_test_deadline_override(False)
+    await message.answer(
+        "Режим теста: дедлайн считается НЕ наступившим — можно оформлять заказ (до «Тест: сброс»).",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: будний день")
+async def btn_test_weekday_on(message: Message, settings: Settings) -> None:
+    set_test_weekday_override(True)
+    await message.answer(
+        "Режим теста: «сегодня будний день» для заказов (до «Тест: сброс»).",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: выходной")
+async def btn_test_weekday_off(message: Message, settings: Settings) -> None:
+    set_test_weekday_override(False)
+    await message.answer(
+        "Режим теста: «сегодня выходной» для заказов (до «Тест: сброс»).",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: сброс")
+async def btn_test_reset(message: Message, settings: Settings) -> None:
+    set_test_deadline_override(None)
+    set_test_weekday_override(None)
+    await message.answer(
+        "Тестовые переопределения сброшены: дедлайн и день недели снова по часам и календарю.",
+        reply_markup=admin_main_kb(settings),
+    )
 
 
 @router.message(IsAdmin(), F.text == "Загрузить меню")
-async def admin_upload_hint(message: Message) -> None:
-    await message.answer("Пришлите файл .docx с меню на сегодня сообщением-документом.")
+async def admin_upload_hint(message: Message, settings: Settings) -> None:
+    await message.answer(
+        "Пришлите файл .docx с меню на сегодня сообщением-документом.",
+        reply_markup=admin_main_kb(settings),
+    )
 
 
 @router.message(IsAdmin(), F.document)
@@ -287,7 +327,7 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
         return
     fn = doc.file_name or ""
     if not fn.lower().endswith(".docx"):
-        await message.answer("Нужен файл .docx")
+        await message.answer("Нужен файл .docx", reply_markup=admin_main_kb(settings))
         return
     bot = message.bot
     f = await bot.get_file(doc.file_id)
@@ -297,18 +337,24 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
     try:
         items = parse_docx_bytes(data)
     except Exception as e:  # noqa: BLE001
-        await message.answer(f"Не удалось разобрать файл: {e}")
+        await message.answer(f"Не удалось разобрать файл: {e}", reply_markup=admin_main_kb(settings))
         return
     if not items:
-        await message.answer("Не найдено ни одной строки меню (название + цена).")
+        await message.answer(
+            "Не найдено ни одной строки меню (название + цена).",
+            reply_markup=admin_main_kb(settings),
+        )
         return
     today = local_today(settings.tz)
     db.create_menu(conn, today, "manual", items)
-    await message.answer(f"Меню на {today.isoformat()} загружено, позиций: {len(items)}.")
+    await message.answer(
+        f"Меню на {today.isoformat()} загружено, позиций: {len(items)}.",
+        reply_markup=admin_main_kb(settings),
+    )
 
 
 @router.message(IsAdmin(), F.text == "Сводка столовой")
-async def admin_canteen_choose(message: Message) -> None:
+async def admin_canteen_choose(message: Message, settings: Settings) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -338,7 +384,7 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
         chunk = 3800
         for i in range(0, len(text), chunk):
             await bot.send_message(chat_id, text[i : i + chunk])
-        await cb.message.answer("Сводка отправлена текстом.")
+        await cb.message.answer("Сводка отправлена текстом.", reply_markup=admin_main_kb(settings))
         await cb.answer()
         return
     if fmt == "xlsx":
@@ -360,14 +406,17 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
     else:
         await cb.answer("Неизвестный формат", show_alert=True)
         return
-    await cb.message.answer("Сводка отправлена файлом.")
+    await cb.message.answer("Сводка отправлена файлом.", reply_markup=admin_main_kb(settings))
     await cb.answer()
 
 
 @router.message(IsAdmin(), F.text == "Месячный отчёт")
 async def admin_monthly_manual(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     if not settings.admin_ids:
-        await message.answer("ADMIN_IDS не задан в .env.")
+        await message.answer("ADMIN_IDS не задан в .env.", reply_markup=admin_main_kb(settings))
         return
     await send_monthly_report_previous(message.bot, conn, settings, mark_sent=False)
-    await message.answer("Отчёт отправлен администраторам (внеочередной, без блокировки авто-отчёта).")
+    await message.answer(
+        "Отчёт отправлен администраторам (внеочередной, без блокировки авто-отчёта).",
+        reply_markup=admin_main_kb(settings),
+    )

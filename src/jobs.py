@@ -12,19 +12,13 @@ from . import db
 from .config import Settings
 from .handlers.common import employee_main_kb
 from .imap_client import fetch_latest_docx_attachments
+from .menu_export import build_menu_txt_bytes
 from .menu_parse import parse_docx_bytes
 from .reports import build_monthly_xlsx, monthly_totals_by_employee
 from .timeutil import is_weekday, local_today, previous_month
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup
 
 log = logging.getLogger(__name__)
-
-
-def _menu_lines(items: list[db.MenuItemRow]) -> str:
-    lines = ["Меню на сегодня:"]
-    for it in items:
-        lines.append(f"• {it.dish_name} — {it.price:.2f} руб.")
-    return "\n".join(lines)
 
 
 def collect_menu_broadcast_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
@@ -38,7 +32,7 @@ def collect_menu_broadcast_recipients(conn: sqlite3.Connection, settings: Settin
 
 def build_menu_broadcast_payload(
     conn: sqlite3.Connection, settings: Settings
-) -> tuple[str, ReplyKeyboardMarkup] | None:
+) -> tuple[bytes, str, str, ReplyKeyboardMarkup] | None:
     today = local_today(settings.tz)
     mid = db.get_menu_for_date(conn, today)
     if not mid:
@@ -46,8 +40,10 @@ def build_menu_broadcast_payload(
     items = db.list_menu_items(conn, mid)
     if not items:
         return None
-    text = _menu_lines(items) + "\n\nОформите заказ кнопкой «Заказ на сегодня»."
-    return text, employee_main_kb()
+    data = build_menu_txt_bytes(items)
+    fname = f"menu_{today.isoformat()}.txt"
+    caption = "Меню на сегодня. Оформите заказ кнопкой «Заказ на сегодня»."
+    return data, fname, caption, employee_main_kb()
 
 
 async def _send_bulk(
@@ -68,6 +64,31 @@ async def _send_bulk(
     return ok, errors
 
 
+async def _send_bulk_document(
+    bot: Bot,
+    user_ids: set[int],
+    data: bytes,
+    filename: str,
+    caption: str,
+    reply_markup: ReplyKeyboardMarkup | None,
+) -> tuple[int, list[str]]:
+    ok = 0
+    errors: list[str] = []
+    for tid in sorted(user_ids):
+        try:
+            await bot.send_document(
+                tid,
+                document=BufferedInputFile(data, filename=filename),
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Send to %s failed: %s", tid, e)
+            errors.append(f"{tid}: {e}")
+    return ok, errors
+
+
 async def test_broadcast_menu_now(
     bot: Bot,
     conn: sqlite3.Connection,
@@ -79,11 +100,11 @@ async def test_broadcast_menu_now(
     payload = build_menu_broadcast_payload(conn, settings)
     if not payload:
         return "Нет меню на сегодня: загрузите .docx (админка) или дождитесь IMAP."
-    text, kb = payload
+    data, fname, caption, kb = payload
     recipients = {only_user_id} if only_user_id is not None else collect_menu_broadcast_recipients(conn, settings)
     if not recipients:
         return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
-    ok, errs = await _send_bulk(bot, recipients, text, kb)
+    ok, errs = await _send_bulk_document(bot, recipients, data, fname, caption, kb)
     extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
     return f"Тестовая рассылка меню: доставлено {ok} из {len(recipients)}.{extra}"
 
@@ -151,9 +172,9 @@ async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: S
     if not payload:
         log.info("No menu to broadcast on %s", today)
         return
-    text, kb = payload
+    data, fname, caption, kb = payload
     recipients = collect_menu_broadcast_recipients(conn, settings)
-    await _send_bulk(bot, recipients, text, kb)
+    await _send_bulk_document(bot, recipients, data, fname, caption, kb)
     db.mark_menu_broadcast(conn, today)
     log.info("Menu broadcast done for %s", today)
 

@@ -10,7 +10,7 @@ import sqlite3
 
 from .. import db
 from ..config import Settings
-from .common import employee_main_kb, is_admin
+from .common import admin_main_kb, employee_main_kb, is_admin
 
 router = Router(name="registration")
 
@@ -31,18 +31,21 @@ async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connectio
             "Меню приходит утром в будни. Заказ — «Заказ на сегодня»."
         )
         if is_admin(uid, settings):
-            text += "\nАдмин-панель открывается командой /admin."
-        await message.answer(text, reply_markup=employee_main_kb())
+            text += "\nАдмин-панель — кнопка «Админ-панель»."
+        await message.answer(
+            text,
+            reply_markup=admin_main_kb(settings) if is_admin(uid, settings) else employee_main_kb(),
+        )
         return
 
     await state.set_state(RegStates.waiting_name)
     text = "Введите фамилию и имя через пробел, как в списке сотрудников.\nПример: Иванов Иван"
     if is_admin(uid, settings):
-        text += "\nЕсли нужно открыть админку: /admin."
+        text += "\nАдминка — кнопка «Админ-панель» после привязки."
     await message.answer(text, reply_markup=None)
 
 
-# Не перехватывать команды (/admin, /add_employee и т.д.) — иначе они не дойдут до admin.router
+# Не перехватывать команды — иначе они не дойдут до других роутеров
 @router.message(RegStates.waiting_name, F.text, ~F.text.startswith("/"))
 async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connection, settings: Settings) -> None:
     raw = (message.text or "").strip()
@@ -50,11 +53,22 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
         "Заказ на сегодня",
         "Корзина",
         "Помощь",
-        "Сотрудники",
+        "Админ-панель",
+        "Добавить сотрудника",
+        "Список сотрудников",
+        "Снять привязку",
+        "Отключить сотрудника",
         "Загрузить меню",
         "Сводка столовой",
         "Месячный отчёт",
         "Привязка для заказа",
+        "Тест: меню всем",
+        "Тест: меню мне",
+        "Тест: закрыть заказы",
+        "Тест: открыть заказы",
+        "Тест: будний день",
+        "Тест: выходной",
+        "Тест: сброс",
     }
     if raw in blocked:
         await message.answer("Сначала введите фамилию и имя для привязки к списку сотрудников.")
@@ -82,7 +96,7 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
     if is_admin(uid, settings):
         await message.answer(
             "Привязка выполнена. Заказ — «Заказ на сегодня» или «Корзина».",
-            reply_markup=employee_main_kb(),
+            reply_markup=admin_main_kb(settings),
         )
     else:
         await message.answer(

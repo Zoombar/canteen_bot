@@ -27,7 +27,7 @@ async def main() -> None:
         logger.warning("ADMIN_IDS пуст — админ-панель и месячные отчёты будут недоступны.")
     if settings.test_mode:
         logger.warning(
-            "TEST_MODE=true: заказы в выходные и без дедлайна; команды /test_* доступны админам."
+            "TEST_MODE=true: заказы в выходные и без дедлайна; тестовые кнопки у админов."
         )
 
     conn = connect(settings.db_path)
@@ -38,8 +38,8 @@ async def main() -> None:
     dp.update.middleware(InjectMiddleware(conn, settings))
 
     dp.include_router(registration.router)
-    dp.include_router(employee_order.router)
     dp.include_router(admin.router)
+    dp.include_router(employee_order.router)
 
     scheduler = setup_scheduler(bot, conn, settings)
     scheduler.start()
