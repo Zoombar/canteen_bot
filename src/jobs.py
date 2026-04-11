@@ -15,7 +15,7 @@ from .imap_client import fetch_latest_docx_attachments
 from .menu_parse import parse_docx_bytes
 from .reports import build_monthly_xlsx, monthly_totals_by_employee
 from .timeutil import is_weekday, local_today, previous_month
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,86 @@ def _menu_lines(items: list[db.MenuItemRow]) -> str:
     for it in items:
         lines.append(f"• {it.dish_name} — {it.price:.2f} руб.")
     return "\n".join(lines)
+
+
+def collect_menu_broadcast_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
+    recipients: set[int] = set(settings.admin_ids)
+    for emp in db.list_employees(conn, active_only=True):
+        tid = emp.telegram_user_id
+        if tid:
+            recipients.add(tid)
+    return recipients
+
+
+def build_menu_broadcast_payload(
+    conn: sqlite3.Connection, settings: Settings
+) -> tuple[str, ReplyKeyboardMarkup] | None:
+    today = local_today(settings.tz)
+    mid = db.get_menu_for_date(conn, today)
+    if not mid:
+        return None
+    items = db.list_menu_items(conn, mid)
+    if not items:
+        return None
+    text = _menu_lines(items) + "\n\nОформите заказ кнопкой «Заказ на сегодня»."
+    return text, employee_main_kb()
+
+
+async def _send_bulk(
+    bot: Bot,
+    user_ids: set[int],
+    text: str,
+    reply_markup: ReplyKeyboardMarkup | None,
+) -> tuple[int, list[str]]:
+    ok = 0
+    errors: list[str] = []
+    for tid in sorted(user_ids):
+        try:
+            await bot.send_message(tid, text, reply_markup=reply_markup)
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Send to %s failed: %s", tid, e)
+            errors.append(f"{tid}: {e}")
+    return ok, errors
+
+
+async def test_broadcast_menu_now(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    only_user_id: int | None = None,
+) -> str:
+    """Ручная рассылка меню (не ставит отметку menu_broadcasts — планировщик может отработать как обычно)."""
+    payload = build_menu_broadcast_payload(conn, settings)
+    if not payload:
+        return "Нет меню на сегодня: загрузите .docx (админка) или дождитесь IMAP."
+    text, kb = payload
+    recipients = {only_user_id} if only_user_id is not None else collect_menu_broadcast_recipients(conn, settings)
+    if not recipients:
+        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
+    ok, errs = await _send_bulk(bot, recipients, text, kb)
+    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
+    return f"Тестовая рассылка меню: доставлено {ok} из {len(recipients)}.{extra}"
+
+
+TEST_ORDERS_CLOSED_TEXT = (
+    "Приём заказов на сегодня закрыт.\n"
+    "Заказ уже нельзя изменить — это тестовое сообщение или дедлайн прошёл."
+)
+
+
+async def test_broadcast_orders_closed(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> str:
+    recipients = collect_menu_broadcast_recipients(conn, settings)
+    if not recipients:
+        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
+    ok, errs = await _send_bulk(bot, recipients, TEST_ORDERS_CLOSED_TEXT, None)
+    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
+    return f"Сообщение «заказы закрыты»: доставлено {ok} из {len(recipients)}.{extra}"
 
 
 async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
@@ -67,25 +147,13 @@ async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: S
     today = local_today(settings.tz)
     if db.was_menu_broadcast(conn, today):
         return
-    mid = db.get_menu_for_date(conn, today)
-    if not mid:
+    payload = build_menu_broadcast_payload(conn, settings)
+    if not payload:
         log.info("No menu to broadcast on %s", today)
         return
-    items = db.list_menu_items(conn, mid)
-    if not items:
-        return
-    text = _menu_lines(items) + "\n\nОформите заказ кнопкой «Заказ на сегодня»."
-    kb = employee_main_kb()
-    recipients: set[int] = set(settings.admin_ids)
-    for emp in db.list_employees(conn, active_only=True):
-        tid = emp.telegram_user_id
-        if tid:
-            recipients.add(tid)
-    for tid in recipients:
-        try:
-            await bot.send_message(tid, text, reply_markup=kb)
-        except Exception as e:  # noqa: BLE001
-            log.warning("Broadcast fail %s: %s", tid, e)
+    text, kb = payload
+    recipients = collect_menu_broadcast_recipients(conn, settings)
+    await _send_bulk(bot, recipients, text, kb)
     db.mark_menu_broadcast(conn, today)
     log.info("Menu broadcast done for %s", today)
 

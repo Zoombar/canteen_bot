@@ -42,7 +42,8 @@ async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connectio
     await message.answer(text, reply_markup=None)
 
 
-@router.message(RegStates.waiting_name, F.text)
+# Не перехватывать команды (/admin, /add_employee и т.д.) — иначе они не дойдут до admin.router
+@router.message(RegStates.waiting_name, F.text, ~F.text.startswith("/"))
 async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connection, settings: Settings) -> None:
     raw = (message.text or "").strip()
     blocked = {
@@ -85,6 +86,6 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
         )
     else:
         await message.answer(
-            f"Готово, {emp.first_name}! Меню приходит в будни около 8:30 (Омск).",
+            f"Готово, {emp.first_name}! Меню приходит в будни около {settings.menu_broadcast_time}.",
             reply_markup=employee_main_kb(),
         )

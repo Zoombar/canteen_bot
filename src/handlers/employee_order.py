@@ -8,13 +8,20 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .. import db
 from ..config import Settings
-from ..timeutil import is_deadline_passed, is_weekday, local_today
+from ..timeutil import is_deadline_passed, is_weekday_effective, local_today
 from .common import employee_main_kb
 
 router = Router(name="employee_order")
 
 PAGE_SIZE = 8
 MAX_DISH_TYPES = 4
+
+
+def _deadline_blocks(settings: Settings) -> bool:
+    """True — дедлайн заказа на сегодня считается наступившим (заказ нельзя менять)."""
+    if settings.test_mode:
+        return False
+    return is_deadline_passed(settings.tz, settings.order_deadline_time)
 
 
 def _emp_id(conn: sqlite3.Connection, uid: int) -> int | None:
@@ -79,7 +86,7 @@ async def _open_menu(
     if not eid:
         await message.answer("Сначала выполните /start и привязку ФИО.")
         return
-    if not is_weekday(settings.tz):
+    if not settings.test_mode and not is_weekday_effective(settings.tz):
         await message.answer("Сегодня выходной — заказ не принимается.")
         return
     today = local_today(settings.tz)
@@ -101,7 +108,7 @@ async def _open_menu(
         )
         return
 
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await message.answer(
             "Время приёма заказов на сегодня истекло.",
             reply_markup=employee_main_kb(),
@@ -138,7 +145,7 @@ async def text_cart(message: Message, conn: sqlite3.Connection, settings: Settin
     if st == "confirmed":
         await message.answer("Заказ уже подтверждён.\n\n" + _cart_text(conn, oid))
         return
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await message.answer("Время приёма заказов на сегодня истекло.")
         return
 
@@ -156,11 +163,21 @@ async def text_cart(message: Message, conn: sqlite3.Connection, settings: Settin
 
 @router.message(F.text == "Помощь")
 async def text_help(message: Message, settings: Settings) -> None:
+    line_menu = (
+        f"• В будни меню рассылается около {settings.menu_broadcast_time}.\n"
+        if not settings.test_mode
+        else f"• Меню по расписанию в будни около {settings.menu_broadcast_time}; в режиме TEST_MODE заказы и в выходные.\n"
+    )
+    line_deadline = (
+        f"• Заказ можно оформить до {settings.order_deadline_time}.\n"
+        if not settings.test_mode
+        else "• Режим TEST_MODE: заказ в любое время суток, дедлайн не действует.\n"
+    )
     await message.answer(
         "Бот заказа питания.\n"
-        f"• В будни меню рассылается около {settings.menu_broadcast_time} ({settings.tz}).\n"
-        f"• Заказ можно оформить до {settings.order_deadline_time}.\n"
-        "• Не более 4 разных блюд в одном заказе.\n"
+        + line_menu
+        + line_deadline
+        + "• Не более 4 разных блюд в одном заказе.\n"
         "• Перед подтверждением откройте «Корзину» и проверьте список.\n"
         "• Команда /start — привязка ФИО.",
     )
@@ -194,7 +211,7 @@ async def cb_menu_page(cb: CallbackQuery, conn: sqlite3.Connection, settings: Se
     if od and od[1] == "confirmed":
         await cb.answer("Уже подтверждено.", show_alert=True)
         return
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
     text = _menu_lines(items)
@@ -211,7 +228,7 @@ async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
         await cb.answer("Нет привязки.", show_alert=True)
         return
     today = local_today(settings.tz)
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
     od = db.get_order_for_employee_date(conn, eid, today)
@@ -237,7 +254,7 @@ async def cb_sub(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
         await cb.answer("Нет привязки.", show_alert=True)
         return
     today = local_today(settings.tz)
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
     od = db.get_order_for_employee_date(conn, eid, today)
@@ -273,7 +290,7 @@ async def cb_cart(cb: CallbackQuery, conn: sqlite3.Connection, settings: Setting
     if st == "confirmed":
         await cb.answer("Уже подтверждено.", show_alert=True)
         return
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
     text = _cart_text(conn, oid)
@@ -297,7 +314,7 @@ async def cb_confirm(cb: CallbackQuery, conn: sqlite3.Connection, settings: Sett
         await cb.answer("Нет привязки.", show_alert=True)
         return
     today = local_today(settings.tz)
-    if is_deadline_passed(settings.tz, settings.order_deadline_time):
+    if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
     od = db.get_order_for_employee_date(conn, eid, today)

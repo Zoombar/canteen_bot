@@ -16,14 +16,22 @@ from aiogram.types import (
 from .. import db
 from ..config import Settings
 from ..menu_parse import parse_docx_bytes
-from ..jobs import send_monthly_report_previous
+from ..jobs import (
+    send_monthly_report_previous,
+    test_broadcast_menu_now,
+    test_broadcast_orders_closed,
+)
 from ..reports import (
     aggregate_daily_canteen,
     build_canteen_csv_bytes,
     build_canteen_excel_bytes,
     format_canteen_text,
 )
-from ..timeutil import local_today
+from ..timeutil import (
+    local_today,
+    set_test_deadline_override,
+    set_test_weekday_override,
+)
 from .common import admin_main_kb, is_admin
 from .registration import RegStates
 
@@ -40,12 +48,92 @@ class IsAdminCb(BaseFilter):
         return bool(cb.from_user and cb.from_user.id in settings.admin_ids)
 
 
-admin_msg = router.message.filter(IsAdmin())
-admin_cb = router.callback_query.filter(IsAdminCb())
+class IsTestMode(BaseFilter):
+    async def __call__(self, message: Message, settings: Settings) -> bool:
+        return settings.test_mode
 
 
-@admin_msg(Command("admin"))
-async def cmd_admin_panel(message: Message, conn: sqlite3.Connection) -> None:
+@router.message(IsAdmin(), IsTestMode(), Command("test_menu"))
+async def cmd_test_menu(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    """Тест: разослать меню на сегодня всем (как утренняя рассылка), без ожидания cron."""
+    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=None)
+    await message.answer(report)
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_menu_me"))
+async def cmd_test_menu_me(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    """Тест: прислать меню только вам."""
+    uid = message.from_user.id if message.from_user else 0
+    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=uid)
+    await message.answer(report)
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_closed"))
+async def cmd_test_closed(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    """Тест: считать дедлайн прошедшим + разослать сообщение «заказы закрыты»."""
+    set_test_deadline_override(True)
+    report = await test_broadcast_orders_closed(message.bot, conn, settings)
+    await message.answer(
+        "Режим теста: дедлайн для заказов считается пройденным.\n" + report
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_open"))
+async def cmd_test_open(message: Message) -> None:
+    """Тест: принудительно разрешить оформлять заказ (игнорировать дедлайн по времени)."""
+    set_test_deadline_override(False)
+    await message.answer(
+        "Режим теста: дедлайн считается НЕ наступившим — можно оформлять заказ (до /test_reset)."
+    )
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_weekday_on"))
+async def cmd_test_weekday_on(message: Message) -> None:
+    """Тест в выходной: вести себя как в будний день для приёма заказов."""
+    set_test_weekday_override(True)
+    await message.answer("Режим теста: «сегодня будний день» для заказов (до /test_reset).")
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_weekday_off"))
+async def cmd_test_weekday_off(message: Message) -> None:
+    """Тест: считать сегодня выходным (заказы недоступны)."""
+    set_test_weekday_override(False)
+    await message.answer("Режим теста: «сегодня выходной» для заказов (до /test_reset).")
+
+
+@router.message(IsAdmin(), IsTestMode(), Command("test_reset"))
+async def cmd_test_reset(message: Message) -> None:
+    """Сбросить тестовые режимы дедлайна и буднего дня — снова реальное время."""
+    set_test_deadline_override(None)
+    set_test_weekday_override(None)
+    await message.answer("Тестовые переопределения сброшены: дедлайн и день недели снова по часам и календарю.")
+
+
+class IsNotTestMode(BaseFilter):
+    async def __call__(self, message: Message, settings: Settings) -> bool:
+        return not settings.test_mode
+
+
+_TEST_COMMANDS = (
+    "test_menu",
+    "test_menu_me",
+    "test_closed",
+    "test_open",
+    "test_weekday_on",
+    "test_weekday_off",
+    "test_reset",
+)
+
+
+@router.message(IsAdmin(), IsNotTestMode(), Command(commands=list(_TEST_COMMANDS)))
+async def test_commands_disabled_hint(message: Message) -> None:
+    await message.answer(
+        "Тестовые команды выключены. В .env установите TEST_MODE=true и перезапустите бота."
+    )
+
+
+@router.message(IsAdmin(), Command("admin"))
+async def cmd_admin_panel(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     uid = message.from_user.id if message.from_user else 0
     emp = db.get_employee_by_tg(conn, uid)
     if emp:
@@ -59,15 +147,23 @@ async def cmd_admin_panel(message: Message, conn: sqlite3.Connection) -> None:
             "1) /add_employee Фамилия Имя\n"
             "2) «Привязка для заказа»."
         )
+    test_block = ""
+    if settings.test_mode:
+        test_block = (
+            "\nРежим TEST_MODE: заказы в выходные и в любое время; команды "
+            "/test_menu, /test_menu_me, /test_closed, /test_open, "
+            "/test_weekday_on, /test_weekday_off, /test_reset.\n"
+        )
     await message.answer(
         "Админ-панель открыта.\n\n"
-        "Разделы: сотрудники, загрузка меню, сводка столовой, месячный отчёт.\n"
+        "Разделы: сотрудники, загрузка меню, сводка столовой, месячный отчёт."
+        f"{test_block}\n"
         f"{bind_hint}",
         reply_markup=admin_main_kb(),
     )
 
 
-@admin_msg(F.text == "Привязка для заказа")
+@router.message(IsAdmin(), F.text == "Привязка для заказа")
 async def admin_bind_for_order(
     message: Message,
     state: FSMContext,
@@ -87,7 +183,7 @@ async def admin_bind_for_order(
     )
 
 
-@admin_msg(F.text == "Сотрудники")
+@router.message(IsAdmin(), F.text == "Сотрудники")
 async def admin_employees_help(message: Message) -> None:
     await message.answer(
         "Управление сотрудниками (только для админа):\n"
@@ -107,7 +203,7 @@ def _parse_fio(text: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-@admin_msg(Command("add_employee"))
+@router.message(IsAdmin(), Command("add_employee"))
 async def cmd_add_employee(message: Message, conn: sqlite3.Connection) -> None:
     raw = message.text or ""
     payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
@@ -124,7 +220,7 @@ async def cmd_add_employee(message: Message, conn: sqlite3.Connection) -> None:
     await message.answer(f"Сотрудник добавлен, id={eid}.")
 
 
-@admin_msg(Command("list_employees"))
+@router.message(IsAdmin(), Command("list_employees"))
 async def cmd_list_employees(message: Message, conn: sqlite3.Connection) -> None:
     rows = db.list_employees(conn, active_only=False)
     if not rows:
@@ -145,7 +241,7 @@ async def cmd_list_employees(message: Message, conn: sqlite3.Connection) -> None
         await message.answer(text[i : i + part])
 
 
-@admin_msg(Command("unlink_employee"))
+@router.message(IsAdmin(), Command("unlink_employee"))
 async def cmd_unlink(message: Message, conn: sqlite3.Connection) -> None:
     raw = message.text or ""
     payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
@@ -161,7 +257,7 @@ async def cmd_unlink(message: Message, conn: sqlite3.Connection) -> None:
     await message.answer("Привязка Telegram сброшена.")
 
 
-@admin_msg(Command("deactivate_employee"))
+@router.message(IsAdmin(), Command("deactivate_employee"))
 async def cmd_deactivate(message: Message, conn: sqlite3.Connection) -> None:
     raw = message.text or ""
     payload = raw.split(maxsplit=1)[1] if len(raw.split(maxsplit=1)) > 1 else ""
@@ -177,12 +273,12 @@ async def cmd_deactivate(message: Message, conn: sqlite3.Connection) -> None:
     await message.answer("Сотрудник отключён.")
 
 
-@admin_msg(F.text == "Загрузить меню")
+@router.message(IsAdmin(), F.text == "Загрузить меню")
 async def admin_upload_hint(message: Message) -> None:
     await message.answer("Пришлите файл .docx с меню на сегодня сообщением-документом.")
 
 
-@admin_msg(F.document)
+@router.message(IsAdmin(), F.document)
 async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     if not is_admin(message.from_user.id, settings):
         return
@@ -211,7 +307,7 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
     await message.answer(f"Меню на {today.isoformat()} загружено, позиций: {len(items)}.")
 
 
-@admin_msg(F.text == "Сводка столовой")
+@router.message(IsAdmin(), F.text == "Сводка столовой")
 async def admin_canteen_choose(message: Message) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -225,7 +321,7 @@ async def admin_canteen_choose(message: Message) -> None:
     await message.answer("Как отправить сводку в чат столовой?", reply_markup=kb)
 
 
-@admin_cb(F.data.startswith("can:"))
+@router.callback_query(IsAdminCb(), F.data.startswith("can:"))
 async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
     fmt = cb.data.split(":", 1)[1]
     today = local_today(settings.tz)
@@ -268,7 +364,7 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
     await cb.answer()
 
 
-@admin_msg(F.text == "Месячный отчёт")
+@router.message(IsAdmin(), F.text == "Месячный отчёт")
 async def admin_monthly_manual(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     if not settings.admin_ids:
         await message.answer("ADMIN_IDS не задан в .env.")

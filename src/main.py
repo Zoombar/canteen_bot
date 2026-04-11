@@ -25,6 +25,10 @@ async def main() -> None:
         raise SystemExit("Укажите BOT_TOKEN в файле .env (см. .env.example).")
     if not settings.admin_ids:
         logger.warning("ADMIN_IDS пуст — админ-панель и месячные отчёты будут недоступны.")
+    if settings.test_mode:
+        logger.warning(
+            "TEST_MODE=true: заказы в выходные и без дедлайна; команды /test_* доступны админам."
+        )
 
     conn = connect(settings.db_path)
     init_schema(conn)
@@ -39,7 +43,7 @@ async def main() -> None:
 
     scheduler = setup_scheduler(bot, conn, settings)
     scheduler.start()
-    logger.info("Планировщик запущен, TZ=%s", settings.tz)
+    logger.info("Планировщик запущен")
 
     await dp.start_polling(bot)
 
