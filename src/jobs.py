@@ -89,6 +89,45 @@ async def _send_bulk_document(
     return ok, errors
 
 
+async def test_broadcast_menu_now(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    only_user_id: int | None = None,
+) -> str:
+    """Ручная рассылка меню (не ставит отметку menu_broadcasts — планировщик может отработать как обычно)."""
+    payload = build_menu_broadcast_payload(conn, settings)
+    if not payload:
+        return "Нет меню на сегодня: загрузите .docx (админка) или дождитесь IMAP."
+    data, fname, caption, kb = payload
+    recipients = {only_user_id} if only_user_id is not None else collect_menu_broadcast_recipients(conn, settings)
+    if not recipients:
+        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
+    ok, errs = await _send_bulk_document(bot, recipients, data, fname, caption, kb)
+    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
+    return f"Тестовая рассылка меню: доставлено {ok} из {len(recipients)}.{extra}"
+
+
+TEST_ORDERS_CLOSED_TEXT = (
+    "Приём заказов на сегодня закрыт.\n"
+    "Заказ уже нельзя изменить — это тестовое сообщение или дедлайн прошёл."
+)
+
+
+async def test_broadcast_orders_closed(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> str:
+    recipients = collect_menu_broadcast_recipients(conn, settings)
+    if not recipients:
+        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
+    ok, errs = await _send_bulk(bot, recipients, TEST_ORDERS_CLOSED_TEXT, None)
+    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
+    return f"Сообщение «заказы закрыты»: доставлено {ok} из {len(recipients)}.{extra}"
+
+
 async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         return
@@ -138,6 +177,45 @@ async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: S
     await _send_bulk_document(bot, recipients, data, fname, caption, kb)
     db.mark_menu_broadcast(conn, today)
     log.info("Menu broadcast done for %s", today)
+
+
+REMINDER_NO_ORDER_TEXT = "Выберите еду, или пролетите с заказом)"
+
+
+def _collect_no_order_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
+    """
+    Сотрудники, которым нужно напомнить о заказе:
+    - активные и привязанные к Telegram
+    - на сегодня нет заказа, либо заказ есть, но без позиций
+    """
+    today = local_today(settings.tz)
+    recipients: set[int] = set()
+    for emp in db.list_employees(conn, active_only=True):
+        tid = emp.telegram_user_id
+        if not tid:
+            continue
+        od = db.get_order_for_employee_date(conn, emp.id, today)
+        if od is None:
+            recipients.add(tid)
+            continue
+        order_id, _status = od
+        if db.count_distinct_dishes_in_order(conn, order_id) == 0:
+            recipients.add(tid)
+    return recipients
+
+
+async def remind_no_order_users(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
+    if not is_weekday(settings.tz):
+        return
+    recipients = _collect_no_order_recipients(conn, settings)
+    if not recipients:
+        log.info("No reminder recipients at 10:00")
+        return
+    kb = employee_main_kb()
+    ok, errs = await _send_bulk(bot, recipients, REMINDER_NO_ORDER_TEXT, kb)
+    log.info("No-order reminder sent: %s/%s", ok, len(recipients))
+    if errs:
+        log.warning("No-order reminder errors: %s", len(errs))
 
 
 async def send_monthly_report_previous(
@@ -195,6 +273,14 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
         ),
         args=[bot, conn, settings],
         id="menu_broadcast",
+        replace_existing=True,
+    )
+
+    sched.add_job(
+        remind_no_order_users,
+        CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=settings.tz),
+        args=[bot, conn, settings],
+        id="no_order_reminder",
         replace_existing=True,
     )
 

@@ -49,6 +49,24 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
         ],
         [KeyboardButton(text="Месячный отчёт")],
     ]
+    if settings.test_mode:
+        rows.extend(
+            [
+                [
+                    KeyboardButton(text="Тест: меню всем"),
+                    KeyboardButton(text="Тест: меню мне"),
+                ],
+                [
+                    KeyboardButton(text="Тест: закрыть заказы"),
+                    KeyboardButton(text="Тест: открыть заказы"),
+                ],
+                [
+                    KeyboardButton(text="Тест: будний день"),
+                    KeyboardButton(text="Тест: выходной"),
+                ],
+                [KeyboardButton(text="Тест: сброс")],
+            ]
+        )
     rows.extend(
         [
             [KeyboardButton(text="Заказ на сегодня")],
