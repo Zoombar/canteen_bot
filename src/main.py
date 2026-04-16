@@ -73,6 +73,30 @@ async def main() -> None:
     init_schema(conn)
 
     bot = Bot(token=settings.bot_token)
+    try:
+        me = await bot.get_me()
+        logger.info(
+            "Telegram: бот @%s (id=%s) — токен валиден, API доступен",
+            me.username or "без_username",
+            me.id,
+        )
+        wh = await bot.get_webhook_info()
+        if wh.url:
+            logger.warning(
+                "Настроен webhook %s — при polling апдейты могут не приходить. Сбрасываю webhook.",
+                wh.url,
+            )
+            await bot.delete_webhook(drop_pending_updates=False)
+            logger.info("Webhook сброшен, используется long polling.")
+        else:
+            logger.info("Webhook не задан — режим long polling.")
+    except Exception:
+        logger.exception(
+            "Не удалось связаться с api.telegram.org (getMe/webhook). "
+            "Проверьте BOT_TOKEN, исходящий HTTPS с сервера и отсутствие второго экземпляра бота."
+        )
+        raise
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.middleware(InjectMiddleware(conn, settings))
 
