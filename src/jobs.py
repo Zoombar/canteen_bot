@@ -89,45 +89,6 @@ async def _send_bulk_document(
     return ok, errors
 
 
-async def test_broadcast_menu_now(
-    bot: Bot,
-    conn: sqlite3.Connection,
-    settings: Settings,
-    *,
-    only_user_id: int | None = None,
-) -> str:
-    """Ручная рассылка меню (не ставит отметку menu_broadcasts — планировщик может отработать как обычно)."""
-    payload = build_menu_broadcast_payload(conn, settings)
-    if not payload:
-        return "Нет меню на сегодня: загрузите .docx (админка) или дождитесь IMAP."
-    data, fname, caption, kb = payload
-    recipients = {only_user_id} if only_user_id is not None else collect_menu_broadcast_recipients(conn, settings)
-    if not recipients:
-        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
-    ok, errs = await _send_bulk_document(bot, recipients, data, fname, caption, kb)
-    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
-    return f"Тестовая рассылка меню: доставлено {ok} из {len(recipients)}.{extra}"
-
-
-TEST_ORDERS_CLOSED_TEXT = (
-    "Приём заказов на сегодня закрыт.\n"
-    "Заказ уже нельзя изменить — это тестовое сообщение или дедлайн прошёл."
-)
-
-
-async def test_broadcast_orders_closed(
-    bot: Bot,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> str:
-    recipients = collect_menu_broadcast_recipients(conn, settings)
-    if not recipients:
-        return "Некому слать: пусто ADMIN_IDS и нет привязанных сотрудников."
-    ok, errs = await _send_bulk(bot, recipients, TEST_ORDERS_CLOSED_TEXT, None)
-    extra = f"\nОшибки ({len(errs)}):\n" + "\n".join(errs[:5]) if errs else ""
-    return f"Сообщение «заказы закрыты»: доставлено {ok} из {len(recipients)}.{extra}"
-
-
 async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         return

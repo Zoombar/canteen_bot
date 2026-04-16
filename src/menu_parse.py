@@ -29,9 +29,72 @@ def classify_dish(name: str) -> DishKind:
     if m and not g:
         return "main"
     if g and m:
-        # ambiguous: prefer main (common in lines like "Куриное филе с рисом")
         return "main"
     return "other"
+
+
+_CALORIES_IN_NAME_RE = re.compile(
+    r"""
+    (?:
+        \s*[\(\[]?\s*
+        \d{1,4}\s*(?:ккал(?:орий)?|kcal)\b
+        \s*[\)\]]?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def strip_calories_from_dish_name(name: str) -> str:
+    n = name.strip()
+    if not n:
+        return n
+    prev = None
+    while prev != n:
+        prev = n
+        n = _CALORIES_IN_NAME_RE.sub(" ", n)
+        n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
+def _is_nutrition_numeric_token(t: str) -> bool:
+    t = t.strip()
+    if not t:
+        return False
+    if re.fullmatch(r"\d+шт", t, re.IGNORECASE):
+        return True
+    if re.fullmatch(r"\d+[,.]\d+", t):
+        return True
+    if re.fullmatch(r"\d+", t):
+        return True
+    if re.fullmatch(r"\d+/\d+", t):
+        return True
+    if re.fullmatch(r"\d+,", t):
+        return True
+    return False
+
+
+def strip_nutrition_table_tail(name: str) -> str:
+    parts = name.split()
+    if len(parts) < 4:
+        return name
+    i = len(parts)
+    while i > 0 and _is_nutrition_numeric_token(parts[i - 1]):
+        i -= 1
+    removed = len(parts) - i
+    if removed >= 4:
+        return " ".join(parts[:i]).strip()
+    return name
+
+
+def sanitize_dish_name(name: str) -> str:
+    n = name.strip()
+    if not n:
+        return n
+    n = strip_nutrition_table_tail(n)
+    n = strip_calories_from_dish_name(n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
 
 
 _PRICE_RE = re.compile(
@@ -51,8 +114,8 @@ def _parse_price_token(token: str) -> float | None:
         return None
     s = s.replace("\u00a0", " ")
     s = re.sub(r"\s+", "", s)
+    s = s.strip(".,;:()[]{}")
     s = s.rstrip("рубРУБ.р")
-    # Common DOCX-table format: 50-00, 100-0
     m_dash = re.fullmatch(r"(\d+)-(\d{1,2})", s)
     if m_dash:
         rub = m_dash.group(1)
@@ -71,21 +134,146 @@ def _parse_price_token(token: str) -> float | None:
     return price
 
 
+_CATEGORY_PREFIXES_MULTI = frozenset(
+    {
+        "выпечка",
+        "гарниры",
+        "напитки",
+        "второе",
+        "вторые",
+        "десерты",
+        "закуски",
+        "блюда",
+    }
+)
+_CATEGORY_PREFIXES_SINGLE = frozenset({"выпечка", "гарниры", "напитки"})
+
+_DASH_PRICE_IN_LINE_RE = re.compile(r"(?<!\S)(\d+-\d{1,2})(?!\S)")
+
+
+def _maybe_strip_category_prefix(name: str, *, multi_item_line: bool) -> str:
+    parts = name.split()
+    if len(parts) < 2:
+        return name
+    first = parts[0].casefold()
+    allowed = _CATEGORY_PREFIXES_MULTI if multi_item_line else _CATEGORY_PREFIXES_SINGLE
+    if first in allowed:
+        return " ".join(parts[1:]).strip()
+    return name
+
+
+def split_multi_price_line(line: str) -> list[tuple[str, float]] | None:
+    s = line.strip()
+    if not s:
+        return None
+    s = re.sub(r"\s*[—–]\s*", " ", s)
+    s = re.sub(r"\s*₽\s*$", "", s)
+    s = re.sub(r"\s*руб\.?\s*$", "", s, flags=re.IGNORECASE)
+    matches = list(_DASH_PRICE_IN_LINE_RE.finditer(s))
+    if not matches:
+        return None
+    out: list[tuple[str, float]] = []
+    prev = 0
+    for m in matches:
+        tok = m.group(1)
+        price = _parse_price_token(tok)
+        if price is None:
+            continue
+        chunk = s[prev : m.start()].strip()
+        prev = m.end()
+        if chunk:
+            out.append((chunk, price))
+    return out if out else None
+
+
+def _split_top_level_by_commas(s: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = {v: k for k, v in pairs.items()}
+    for ch in s:
+        if ch in pairs:
+            depth += 1
+        elif ch in closing:
+            depth = max(0, depth - 1)
+        if depth == 0 and ch in [",", ";"]:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+_EXPLICIT_RUB_TOKEN_RE = re.compile(
+    r"\d+(?:[.,]\d{1,2})?\s*(?:руб|р\.?|р)\b",
+    re.IGNORECASE,
+)
+
+
+def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
+    if not line or not _EXPLICIT_RUB_TOKEN_RE.search(line):
+        return None
+
+    s = line.strip()
+    s = s.strip(" \t\r\n")
+
+    raw_parts = _split_top_level_by_commas(s)
+    out: list[tuple[str, float]] = []
+
+    for part in raw_parts:
+        part = part.strip().strip(".,;:")
+        if not part:
+            continue
+        part = re.sub(r"^\s*\d+\s*[.)]\s*", "", part)
+
+        if not _EXPLICIT_RUB_TOKEN_RE.search(part):
+            continue
+
+        parsed = _parse_line(part)
+        if parsed is None:
+            continue
+        name, price = parsed
+        if name and price is not None:
+            out.append((name, price))
+
+    return out if len(out) >= 2 else None
+
+
+def _parse_one_line_to_items(line: str) -> tuple[list[tuple[str, float]], bool]:
+    multi = split_multi_price_line(line)
+    if multi is not None and len(multi) >= 2:
+        return multi, True
+
+    multi_comma = split_multi_comma_price_line(line)
+    if multi_comma is not None and len(multi_comma) >= 2:
+        return multi_comma, True
+
+    single = _parse_line(line)
+    if single:
+        return [single], False
+    if multi is not None and len(multi) == 1:
+        return multi, False
+    return [], False
+
+
 def _parse_line(line: str) -> tuple[str, float] | None:
     s = line.strip()
     if not s or len(s) < 2:
         return None
-    # Normalize long dashes between words, but keep numeric "50-00" intact.
     s = re.sub(r"\s*[—–]\s*", " ", s)
     m = _PRICE_RE.match(s)
     if m:
         name = m.group("name").strip().rstrip(".,;")
         price = _parse_price_token(m.group("price"))
-        # Ignore partial regex captures like "Плов 100-" + "5".
         if name and price is not None and not re.search(r"\d-$", name):
             return name, price
 
-    # fallback: parse last token as price (handles "50-00")
     parts = s.rsplit(None, 1)
     if len(parts) == 2:
         name = parts[0].strip()
@@ -113,7 +301,23 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
             cells = [c.text.strip() for c in row.cells if c.text.strip()]
             if not cells:
                 continue
-            # Table format: name in first columns, price in last column.
+
+            parsed_cells: list[tuple[str, float]] = []
+            for cell in cells:
+                if not re.search(r"[A-Za-zА-Яа-яЁё]", cell):
+                    continue
+                parsed = _parse_line(cell)
+                if parsed is None:
+                    continue
+                name, price = parsed
+                if name and price is not None:
+                    parsed_cells.append((name, price))
+
+            if len(parsed_cells) >= 2:
+                for name, price in parsed_cells:
+                    lines.append(f"{name} {price}")
+                continue
+
             price = _parse_price_token(cells[-1] if cells else "")
             if len(cells) >= 2 and price is not None:
                 name = " ".join(cells[:-1])
@@ -123,18 +327,21 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
             lines.append(" ".join(cells))
 
     out: list[tuple[str, float, DishKind]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for line in lines:
-        parsed = _parse_line(line)
-        if not parsed:
-            continue
-        name, price = parsed
-        key = name.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        kind = classify_dish(name)
-        out.append((name, price, kind))
+        raw_items, multi_dash = _parse_one_line_to_items(line)
+        for name, price in raw_items:
+            name = sanitize_dish_name(name)
+            name = _maybe_strip_category_prefix(name, multi_item_line=multi_dash)
+            name = sanitize_dish_name(name)
+            if not name:
+                continue
+            key = (name.casefold(), f"{price:.4f}")
+            if key in seen:
+                continue
+            seen.add(key)
+            kind = classify_dish(name)
+            out.append((name, price, kind))
     return out
 
 

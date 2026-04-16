@@ -15,14 +15,17 @@ from aiogram.types import (
 from .. import db
 from ..config import Settings
 from ..menu_export import build_menu_txt_bytes
+from ..menu_parse import sanitize_dish_name
 from ..timeutil import is_deadline_passed, is_weekday_effective, local_today
 from .common import OrderUiNotBlocked, employee_main_kb
 
 router = Router(name="employee_order")
 
-PAGE_SIZE = 6
+PAGE_SIZE = 4
 MAX_DISH_TYPES = 4
 MAX_CAPTION = 1000
+# Telegram: текст на кнопке не длиннее 64 символов
+TG_BTN_MAX = 64
 
 
 def _deadline_blocks(settings: Settings) -> bool:
@@ -36,17 +39,31 @@ def _emp_id(conn: sqlite3.Connection, uid: int) -> int | None:
     return e.id if e else None
 
 
-def _short_btn_label(name: str, max_len: int = 12) -> str:
-    n = name.strip()
-    if len(n) <= max_len:
-        return n
-    return n[: max_len - 1] + "…"
+def _dish_title_button(it: db.MenuItemRow, ordinal: int) -> str:
+    """Одна строка: номер, название и цена (до 64 символов)."""
+    suffix = f" — {it.price:.2f} ₽"
+    prefix = f"{ordinal}. "
+    name = sanitize_dish_name(it.dish_name).strip()
+    if len(prefix) + len(name) + len(suffix) <= TG_BTN_MAX:
+        return prefix + name + suffix
+    room = TG_BTN_MAX - len(prefix) - len(suffix) - 1
+    if room < 4:
+        return (prefix + name + suffix)[:TG_BTN_MAX]
+    return prefix + name[:room] + "…" + suffix
+
+
+def _qty_stepper_middle(qty: int) -> str:
+    """Середина ряда: явно «в заказе» или нет."""
+    if qty <= 0:
+        return "0 шт · не в заказе"
+    return f"{qty} шт · в заказе"
 
 
 def _menu_caption(d: date, page: int, total_pages: int) -> str:
     return (
-        f"Меню на {d.isoformat()}. Страница {page + 1}/{total_pages}. "
-        "Файл — полный список; ниже выберите количество (+/−)."
+        f"Меню на {d.isoformat()}, стр. {page + 1}/{total_pages}.\n"
+        "У каждой позиции две строки: сверху — блюдо и цена, снизу — убрать порцию, "
+        "сколько шт, добавить порцию. Файл во вложении — полный список."
     )
 
 
@@ -59,7 +76,8 @@ def _cart_text(conn: sqlite3.Connection, order_id: int) -> str:
     for mi, q in rows:
         line_sum = mi.price * q
         total += line_sum
-        lines.append(f"• {mi.dish_name} × {q} = {line_sum:.2f} руб.")
+        title = sanitize_dish_name(mi.dish_name)
+        lines.append(f"• {title} × {q} = {line_sum:.2f} руб.")
     lines.append(f"\nИтого: {total:.2f} руб.")
     return "\n".join(lines)
 
@@ -78,17 +96,25 @@ def _menu_kb(
     start = page * PAGE_SIZE
     chunk = items[start : start + PAGE_SIZE]
     rows: list[list[InlineKeyboardButton]] = []
-    for it in chunk:
+    for idx, it in enumerate(chunk):
         qty = cart.get(it.id, 0)
+        ordinal = start + idx + 1
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_short_btn_label(it.dish_name),
+                    text=_dish_title_button(it, ordinal),
                     callback_data=f"n:{it.id}:{page}",
                 ),
-                InlineKeyboardButton(text="+", callback_data=f"+:{it.id}:{page}"),
+            ]
+        )
+        rows.append(
+            [
                 InlineKeyboardButton(text="−", callback_data=f"sub:{it.id}:{page}"),
-                InlineKeyboardButton(text=str(qty), callback_data=f"q:{it.id}:{page}"),
+                InlineKeyboardButton(
+                    text=_qty_stepper_middle(qty),
+                    callback_data=f"q:{it.id}:{page}",
+                ),
+                InlineKeyboardButton(text="+", callback_data=f"+:{it.id}:{page}"),
             ]
         )
     pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -316,7 +342,8 @@ async def cb_name_info(cb: CallbackQuery, conn: sqlite3.Connection) -> None:
     if not row:
         await cb.answer("Позиция не найдена.", show_alert=True)
         return
-    await cb.answer(f"{row.dish_name} — {row.price:.2f} руб.", show_alert=True)
+    title = sanitize_dish_name(row.dish_name)
+    await cb.answer(f"{title} — {row.price:.2f} руб.", show_alert=True)
 
 
 @router.callback_query(OrderUiNotBlocked(), F.data.startswith("q:"))
@@ -336,7 +363,7 @@ async def cb_qty_info(cb: CallbackQuery, conn: sqlite3.Connection, settings: Set
     cart = _load_cart_dict(conn, oid)
     qty = cart.get(item_id, 0)
     row = db.get_menu_item(conn, item_id)
-    name = row.dish_name if row else "Блюдо"
+    name = sanitize_dish_name(row.dish_name) if row else "Блюдо"
     await cb.answer(f"{name}: {qty} шт.", show_alert=True)
 
 

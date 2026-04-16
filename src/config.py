@@ -57,7 +57,8 @@ def load_settings() -> Settings:
             if (_cc := (os.getenv("CANTEEN_CHAT_ID") or "").strip())
             else None
         ),
-        tz=os.getenv("TZ", "Asia/Omsk").strip() or "Asia/Omsk",
+        # Таймзона всегда Омск, независимо от того, где крутится сервер.
+        tz="Asia/Omsk",
         menu_broadcast_time=os.getenv("MENU_BROADCAST_TIME", "08:30").strip() or "08:30",
         order_deadline_time=os.getenv("ORDER_DEADLINE_TIME", "11:00").strip() or "11:00",
         imap_host=(os.getenv("IMAP_HOST") or "").strip() or None,

@@ -27,32 +27,11 @@ def is_weekday(tz_name: str) -> bool:
     return local_now(tz_name).weekday() < 5
 
 
-# Тестовые переопределения (только для ручной проверки; сброс: /test_reset)
-_test_weekday_override: bool | None = None
-_test_deadline_override: bool | None = None
-
-
-def set_test_weekday_override(value: bool | None) -> None:
-    """None — календарь как обычно; True — как будний; False — как выходной."""
-    global _test_weekday_override
-    _test_weekday_override = value
-
-
-def set_test_deadline_override(value: bool | None) -> None:
-    """None — смотреть на часы; True — считать дедлайн прошедшим; False — не прошедшим."""
-    global _test_deadline_override
-    _test_deadline_override = value
-
-
 def is_weekday_effective(tz_name: str) -> bool:
-    if _test_weekday_override is not None:
-        return _test_weekday_override
     return is_weekday(tz_name)
 
 
 def is_deadline_passed(tz_name: str, deadline_hhmm: str) -> bool:
-    if _test_deadline_override is not None:
-        return _test_deadline_override
     now = local_now(tz_name)
     t = parse_hhmm(deadline_hhmm)
     dl = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)

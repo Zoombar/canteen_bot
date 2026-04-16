@@ -246,13 +246,30 @@ def get_menu_for_date(conn: sqlite3.Connection, d: date) -> int | None:
     return int(row["id"]) if row else None
 
 
+def _disambiguate_menu_item_names(
+    items: list[tuple[str, float, DishKind]],
+) -> list[tuple[str, float, DishKind]]:
+    """UNIQUE(menu_id, dish_name): при одинаковом названии разных цен добавляем цену в имя."""
+    counts: dict[str, int] = {}
+    out: list[tuple[str, float, DishKind]] = []
+    for name, price, kind in items:
+        key = name.strip().casefold()
+        n = counts.get(key, 0) + 1
+        counts[key] = n
+        if n == 1:
+            out.append((name, price, kind))
+        else:
+            out.append((f"{name} ({price:.2f} ₽)", price, kind))
+    return out
+
+
 def create_menu(
     conn: sqlite3.Connection,
     d: date,
     source: str,
     items: Iterable[tuple[str, float, DishKind]],
 ) -> int:
-    items_list = list(items)
+    items_list = _disambiguate_menu_item_names(list(items))
     with transaction(conn):
         conn.execute("DELETE FROM menus WHERE menu_date = ?", (d.isoformat(),))
         cur = conn.execute(

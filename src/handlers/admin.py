@@ -4,7 +4,7 @@ import io
 import sqlite3
 
 from aiogram import F, Router
-from aiogram.filters import BaseFilter, Command, StateFilter
+from aiogram.filters import BaseFilter, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     BufferedInputFile,
@@ -18,8 +18,6 @@ from .. import db
 from ..config import Settings
 from ..jobs import (
     send_monthly_report_previous,
-    test_broadcast_menu_now,
-    test_broadcast_orders_closed,
 )
 from ..menu_parse import parse_docx_bytes
 from ..reports import (
@@ -30,8 +28,6 @@ from ..reports import (
 )
 from ..timeutil import (
     local_today,
-    set_test_deadline_override,
-    set_test_weekday_override,
 )
 from .common import admin_main_kb, is_admin
 from .registration import RegStates
@@ -48,34 +44,6 @@ class IsAdmin(BaseFilter):
 class IsAdminCb(BaseFilter):
     async def __call__(self, cb: CallbackQuery, settings: Settings) -> bool:
         return bool(cb.from_user and cb.from_user.id in settings.admin_ids)
-
-
-class IsTestMode(BaseFilter):
-    async def __call__(self, message: Message, settings: Settings) -> bool:
-        return settings.test_mode
-
-
-class IsNotTestMode(BaseFilter):
-    async def __call__(self, message: Message, settings: Settings) -> bool:
-        return not settings.test_mode
-
-
-_TEST_COMMANDS = (
-    "test_menu",
-    "test_menu_me",
-    "test_closed",
-    "test_open",
-    "test_weekday_on",
-    "test_weekday_off",
-    "test_reset",
-)
-
-
-@router.message(IsAdmin(), IsNotTestMode(), Command(commands=list(_TEST_COMMANDS)))
-async def test_commands_disabled_hint(message: Message) -> None:
-    await message.answer(
-        "Тестовые команды выключены. В .env установите TEST_MODE=true и перезапустите бота."
-    )
 
 
 def _parse_fio(text: str) -> tuple[str, str] | None:
@@ -100,7 +68,7 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
     test_block = ""
     if settings.test_mode:
         test_block = (
-            "\nРежим TEST_MODE: заказы в выходные и в любое время; тестовые кнопки внизу клавиатуры.\n"
+            "\nРежим TEST_MODE: заказы в выходные и в любое время; дедлайн не действует.\n"
         )
     return (
         "Админ-панель.\n\n"
@@ -248,66 +216,6 @@ async def admin_do_deactivate(
     db.deactivate_employee(conn, emp.id)
     await state.clear()
     await message.answer("Сотрудник отключён.", reply_markup=admin_main_kb(settings))
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню всем")
-async def btn_test_menu_all(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=None)
-    await message.answer(report, reply_markup=admin_main_kb(settings))
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню мне")
-async def btn_test_menu_me(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    uid = message.from_user.id if message.from_user else 0
-    report = await test_broadcast_menu_now(message.bot, conn, settings, only_user_id=uid)
-    await message.answer(report, reply_markup=admin_main_kb(settings))
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: закрыть заказы")
-async def btn_test_closed(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    set_test_deadline_override(True)
-    report = await test_broadcast_orders_closed(message.bot, conn, settings)
-    await message.answer(
-        "Режим теста: дедлайн для заказов считается пройденным.\n" + report,
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: открыть заказы")
-async def btn_test_open(message: Message, settings: Settings) -> None:
-    set_test_deadline_override(False)
-    await message.answer(
-        "Режим теста: дедлайн считается НЕ наступившим — можно оформлять заказ (до «Тест: сброс»).",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: будний день")
-async def btn_test_weekday_on(message: Message, settings: Settings) -> None:
-    set_test_weekday_override(True)
-    await message.answer(
-        "Режим теста: «сегодня будний день» для заказов (до «Тест: сброс»).",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: выходной")
-async def btn_test_weekday_off(message: Message, settings: Settings) -> None:
-    set_test_weekday_override(False)
-    await message.answer(
-        "Режим теста: «сегодня выходной» для заказов (до «Тест: сброс»).",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: сброс")
-async def btn_test_reset(message: Message, settings: Settings) -> None:
-    set_test_deadline_override(None)
-    set_test_weekday_override(None)
-    await message.answer(
-        "Тестовые переопределения сброшены: дедлайн и день недели снова по часам и календарю.",
-        reply_markup=admin_main_kb(settings),
-    )
 
 
 @router.message(IsAdmin(), F.text == "Загрузить меню")

@@ -27,7 +27,7 @@ async def main() -> None:
         logger.warning("ADMIN_IDS пуст — админ-панель и месячные отчёты будут недоступны.")
     if settings.test_mode:
         logger.warning(
-            "TEST_MODE=true: заказы в выходные и без дедлайна; тестовые кнопки у админов."
+            "TEST_MODE=true: заказы в выходные и без дедлайна."
         )
 
     conn = connect(settings.db_path)
