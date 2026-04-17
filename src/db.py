@@ -538,3 +538,19 @@ def mark_monthly_report_sent(conn: sqlite3.Connection, year_month: str) -> None:
             """,
             (year_month, datetime.utcnow().isoformat(timespec="seconds") + "Z"),
         )
+
+
+def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
+    """
+    Полный сброс рабочих данных бота (как "новая" база без миграций):
+    сотрудники, меню, заказы, обработанные письма, отметки рассылок и отчётов.
+    """
+    with transaction(conn):
+        conn.execute("DELETE FROM order_items")
+        conn.execute("DELETE FROM orders")
+        conn.execute("DELETE FROM menu_items")
+        conn.execute("DELETE FROM menus")
+        conn.execute("DELETE FROM employees")
+        conn.execute("DELETE FROM processed_emails")
+        conn.execute("DELETE FROM menu_broadcasts")
+        conn.execute("DELETE FROM monthly_reports_sent")

@@ -413,11 +413,14 @@ async def btn_test_weekday_off(message: Message, settings: Settings) -> None:
 
 
 @router.message(IsAdmin(), IsTestMode(), F.text == "Тест: сброс")
-async def btn_test_reset(message: Message, settings: Settings) -> None:
+async def btn_test_reset(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     set_test_deadline_override(None)
     set_test_weekday_override(None)
+    db.reset_all_runtime_data(conn)
     await message.answer(
-        "Тестовые переопределения сброшены: дедлайн и день недели снова по часам и календарю.",
+        "Тестовый сброс выполнен.\n"
+        "Удалены сотрудники, меню, заказы и служебные отметки.\n"
+        "Бот приведён к состоянию 'как новый'.",
         reply_markup=admin_main_kb(settings),
     )
 
