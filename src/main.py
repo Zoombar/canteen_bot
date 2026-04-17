@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import load_settings
 from .db import connect, init_schema
-from .handlers import admin, employee_order, registration
+from .handlers import admin, employee_order, fallback, registration
 from .jobs import setup_scheduler
 from .middleware import InjectMiddleware
 
@@ -153,6 +153,7 @@ async def main() -> None:
     dp.include_router(registration.router)
     dp.include_router(admin.router)
     dp.include_router(employee_order.router)
+    dp.include_router(fallback.router)
 
     scheduler = setup_scheduler(bot, conn, settings)
     scheduler.start()

@@ -84,6 +84,14 @@ async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connectio
 @router.message(RegStates.waiting_name, F.text, ~F.text.startswith("/"))
 async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connection, settings: Settings) -> None:
     raw = (message.text or "").strip()
+    uid = message.from_user.id if message.from_user else 0
+    admin = is_admin(uid, settings)
+
+    if raw == "Админ-панель" and admin:
+        await state.clear()
+        await message.answer("Открываю админ-панель.", reply_markup=admin_main_kb(settings))
+        return
+
     blocked = {
         "Заказ на сегодня",
         "Корзина",
@@ -109,7 +117,7 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
     if raw in blocked:
         await message.answer("Сначала введите фамилию и имя для привязки к списку сотрудников.")
         return
-    uid = message.from_user.id if message.from_user else 0
+
     parts = raw.split()
     if len(parts) < 2:
         await message.answer("Нужно минимум два слова: Фамилия Имя.")
@@ -117,8 +125,29 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
     last_name, first_name = parts[0], parts[1]
     emp = db.find_employee_by_name(conn, last_name, first_name)
     if not emp:
-        await message.answer("Сотрудник не найден. Проверьте написание или обратитесь к администратору.")
-        return
+        if admin:
+            # Для админа разрешаем саморегистрацию: создаём запись сотрудника при первом вводе ФИО.
+            try:
+                new_id = db.add_employee(conn, last_name, first_name)
+            except sqlite3.IntegrityError:
+                existing = db.find_employee_by_name_admin(conn, last_name, first_name)
+                if not existing:
+                    await message.answer("Не удалось создать сотрудника, попробуйте ещё раз.")
+                    return
+                if not existing.active:
+                    db.activate_employee(conn, existing.id)
+                emp = db.find_employee_by_name(conn, last_name, first_name)
+                if not emp:
+                    await message.answer("Не удалось активировать сотрудника, попробуйте ещё раз.")
+                    return
+            else:
+                emp = db.find_employee_by_name(conn, last_name, first_name)
+                if not emp:
+                    await message.answer(f"Сотрудник создан (id={new_id}), но привязка не удалась. Повторите /start.")
+                    return
+        else:
+            await message.answer("Сотрудник не найден. Проверьте написание или обратитесь к администратору.")
+            return
     if emp.telegram_user_id is not None and emp.telegram_user_id != uid:
         await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
         return
@@ -129,7 +158,7 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
         return
 
     await state.clear()
-    if is_admin(uid, settings):
+    if admin:
         await message.answer(
             "Привязка выполнена. Заказ — «Заказ на сегодня» или «Корзина».",
             reply_markup=admin_main_kb(settings),

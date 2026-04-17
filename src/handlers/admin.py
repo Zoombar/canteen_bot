@@ -155,8 +155,25 @@ async def admin_do_bind_for_order(
     last_name, first_name = parsed
     emp = db.find_employee_by_name(conn, last_name, first_name)
     if not emp:
-        await message.answer("Сотрудник не найден. Проверьте написание или обратитесь к администратору.")
-        return
+        # Для админа в этом сценарии разрешаем создать себя в списке сотрудников.
+        try:
+            new_id = db.add_employee(conn, last_name, first_name)
+        except sqlite3.IntegrityError:
+            existing = db.find_employee_by_name_admin(conn, last_name, first_name)
+            if not existing:
+                await message.answer("Не удалось создать сотрудника, попробуйте ещё раз.")
+                return
+            if not existing.active:
+                db.activate_employee(conn, existing.id)
+            emp = db.find_employee_by_name(conn, last_name, first_name)
+            if not emp:
+                await message.answer("Не удалось активировать сотрудника, попробуйте ещё раз.")
+                return
+        else:
+            emp = db.find_employee_by_name(conn, last_name, first_name)
+            if not emp:
+                await message.answer(f"Сотрудник создан (id={new_id}), но привязка не удалась. Повторите /start.")
+                return
     if emp.telegram_user_id is not None and emp.telegram_user_id != uid:
         await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
         return

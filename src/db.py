@@ -241,6 +241,11 @@ def deactivate_employee(conn: sqlite3.Connection, employee_id: int) -> None:
         conn.execute("UPDATE employees SET active = 0 WHERE id = ?", (employee_id,))
 
 
+def activate_employee(conn: sqlite3.Connection, employee_id: int) -> None:
+    with transaction(conn):
+        conn.execute("UPDATE employees SET active = 1 WHERE id = ?", (employee_id,))
+
+
 def delete_employee(conn: sqlite3.Connection, employee_id: int) -> None:
     with transaction(conn):
         conn.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
