@@ -19,6 +19,41 @@ class RegStates(StatesGroup):
     waiting_name = State()
 
 
+@router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    uid = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
+    username_text = f"@{username}" if username else "(не задан)"
+    await message.answer(
+        f"Ваш Telegram ID: {uid}\n"
+        f"Username: {username_text}"
+    )
+
+
+@router.message(Command("debug_admin"))
+async def cmd_debug_admin(message: Message, state: FSMContext, settings: Settings) -> None:
+    uid = message.from_user.id if message.from_user else 0
+    admin = is_admin(uid, settings)
+    if not admin:
+        await message.answer(
+            "Команда только для админа.\n"
+            f"Ваш ID: {uid}\n"
+            "Проверьте, что он добавлен в ADMIN_IDS и перезапустите бота."
+        )
+        return
+
+    current_state = await state.get_state()
+    state_text = current_state if current_state is not None else "(нет активного состояния)"
+    await message.answer(
+        "Диагностика админа:\n"
+        f"- ваш id: {uid}\n"
+        f"- is_admin: {admin}\n"
+        f"- ADMIN_IDS: {', '.join(str(x) for x in settings.admin_ids)}\n"
+        f"- текущее состояние FSM: {state_text}\n"
+        f"- test_mode: {settings.test_mode}"
+    )
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connection, settings: Settings) -> None:
     await state.clear()
