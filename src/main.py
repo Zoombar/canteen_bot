@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import load_settings
@@ -57,6 +58,71 @@ def setup_logging() -> None:
 
 logger = logging.getLogger(__name__)
 
+# Таймаут HTTP к api.telegram.org (сек). На части хостингов дефолт aiogram мал — бывает timeout.
+_TELEGRAM_HTTP_TIMEOUT = 120
+# Повторы при сетевых таймаутах (не поможет, если 443 к Telegram заблокирован у провайдера).
+_TELEGRAM_CONNECT_ATTEMPTS = 5
+
+
+async def _ensure_telegram_api(bot: Bot) -> None:
+    """getMe + проверка webhook; повторы при TelegramNetworkError."""
+    last: BaseException | None = None
+    for attempt in range(1, _TELEGRAM_CONNECT_ATTEMPTS + 1):
+        try:
+            me = await bot.get_me(request_timeout=_TELEGRAM_HTTP_TIMEOUT)
+            logger.info(
+                "Telegram: бот @%s (id=%s) — токен валиден, API доступен",
+                me.username or "без_username",
+                me.id,
+            )
+            wh = await bot.get_webhook_info(request_timeout=_TELEGRAM_HTTP_TIMEOUT)
+            if wh.url:
+                logger.warning(
+                    "Настроен webhook %s — при polling апдейты могут не приходить. Сбрасываю webhook.",
+                    wh.url,
+                )
+                await bot.delete_webhook(
+                    drop_pending_updates=False, request_timeout=_TELEGRAM_HTTP_TIMEOUT
+                )
+                logger.info("Webhook сброшен, используется long polling.")
+            else:
+                logger.info("Webhook не задан — режим long polling.")
+            return
+        except TelegramNetworkError as e:
+            last = e
+            logger.warning(
+                "Нет ответа от api.telegram.org (попытка %s/%s, timeout=%ss): %s",
+                attempt,
+                _TELEGRAM_CONNECT_ATTEMPTS,
+                _TELEGRAM_HTTP_TIMEOUT,
+                e,
+            )
+        except asyncio.TimeoutError as e:
+            last = e
+            logger.warning(
+                "Таймаут при обращении к Telegram (попытка %s/%s): %s",
+                attempt,
+                _TELEGRAM_CONNECT_ATTEMPTS,
+                e,
+            )
+        if attempt < _TELEGRAM_CONNECT_ATTEMPTS:
+            await asyncio.sleep(min(30.0, 5.0 * attempt))
+
+    logger.error(
+        "Не удалось достучаться до Telegram API после %s попыток. "
+        "Это почти всегда сеть/фаервол хостинга (исходящий HTTPS на api.telegram.org:443). "
+        "Проверка с сервера: curl -v --connect-timeout 15 "
+        "'https://api.telegram.org/bot<TOKEN>/getMe' — должен вернуться JSON, не таймаут.",
+        _TELEGRAM_CONNECT_ATTEMPTS,
+    )
+    try:
+        await bot.session.close()
+    except Exception:
+        pass
+    if last is not None:
+        raise last
+    raise RuntimeError("Telegram API unreachable")
+
 
 async def main() -> None:
     settings = load_settings()
@@ -74,26 +140,10 @@ async def main() -> None:
 
     bot = Bot(token=settings.bot_token)
     try:
-        me = await bot.get_me()
-        logger.info(
-            "Telegram: бот @%s (id=%s) — токен валиден, API доступен",
-            me.username or "без_username",
-            me.id,
-        )
-        wh = await bot.get_webhook_info()
-        if wh.url:
-            logger.warning(
-                "Настроен webhook %s — при polling апдейты могут не приходить. Сбрасываю webhook.",
-                wh.url,
-            )
-            await bot.delete_webhook(drop_pending_updates=False)
-            logger.info("Webhook сброшен, используется long polling.")
-        else:
-            logger.info("Webhook не задан — режим long polling.")
+        await _ensure_telegram_api(bot)
     except Exception:
         logger.exception(
-            "Не удалось связаться с api.telegram.org (getMe/webhook). "
-            "Проверьте BOT_TOKEN, исходящий HTTPS с сервера и отсутствие второго экземпляра бота."
+            "См. сообщение выше: часто нужен исходящий доступ к api.telegram.org или смена хостинга/VPN."
         )
         raise
 
