@@ -43,6 +43,7 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
             KeyboardButton(text="Снять привязку"),
             KeyboardButton(text="Отключить сотрудника"),
         ],
+        [KeyboardButton(text="Удалить сотрудника")],
         [
             KeyboardButton(text="Загрузить меню"),
             KeyboardButton(text="Сводка столовой"),

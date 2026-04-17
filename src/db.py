@@ -241,6 +241,11 @@ def deactivate_employee(conn: sqlite3.Connection, employee_id: int) -> None:
         conn.execute("UPDATE employees SET active = 0 WHERE id = ?", (employee_id,))
 
 
+def delete_employee(conn: sqlite3.Connection, employee_id: int) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+
+
 def get_menu_for_date(conn: sqlite3.Connection, d: date) -> int | None:
     row = conn.execute("SELECT id FROM menus WHERE menu_date = ?", (d.isoformat(),)).fetchone()
     return int(row["id"]) if row else None

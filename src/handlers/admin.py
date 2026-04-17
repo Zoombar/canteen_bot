@@ -34,7 +34,6 @@ from ..timeutil import (
     set_test_weekday_override,
 )
 from .common import admin_main_kb, is_admin
-from .registration import RegStates
 from .states import AdminStates
 
 router = Router(name="admin")
@@ -133,10 +132,43 @@ async def admin_bind_for_order(
             "Снять привязку можно кнопкой «Снять привязку»."
         )
         return
-    await state.set_state(RegStates.waiting_name)
+    await state.set_state(AdminStates.waiting_bind_fio)
     await message.answer(
         "Введите фамилию и имя через пробел (как в списке).\n"
         "Если вас ещё нет в списке — сначала нажмите «Добавить сотрудника»."
+    )
+
+
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_bind_fio), F.text, ~F.text.startswith("/"))
+async def admin_do_bind_for_order(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    raw = (message.text or "").strip()
+    parsed = _parse_fio(raw)
+    if not parsed:
+        await message.answer("Нужно два слова: Фамилия Имя.")
+        return
+    uid = message.from_user.id if message.from_user else 0
+    last_name, first_name = parsed
+    emp = db.find_employee_by_name(conn, last_name, first_name)
+    if not emp:
+        await message.answer("Сотрудник не найден. Проверьте написание или обратитесь к администратору.")
+        return
+    if emp.telegram_user_id is not None and emp.telegram_user_id != uid:
+        await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
+        return
+    try:
+        db.link_employee_telegram(conn, emp.id, uid)
+    except sqlite3.IntegrityError:
+        await message.answer("Этот Telegram уже привязан к другой записи. Обратитесь к администратору.")
+        return
+    await state.clear()
+    await message.answer(
+        "Привязка выполнена. Заказ — «Заказ на сегодня» или «Корзина».",
+        reply_markup=admin_main_kb(settings),
     )
 
 
@@ -248,6 +280,67 @@ async def admin_do_deactivate(
     db.deactivate_employee(conn, emp.id)
     await state.clear()
     await message.answer("Сотрудник отключён.", reply_markup=admin_main_kb(settings))
+
+
+@router.message(IsAdmin(), F.text == "Удалить сотрудника")
+async def admin_prompt_delete(message: Message, state: FSMContext, settings: Settings) -> None:
+    await state.set_state(AdminStates.waiting_delete_fio)
+    await message.answer(
+        "Введите фамилию и имя сотрудника для ПОЛНОГО удаления из базы.",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_delete_fio), F.text, ~F.text.startswith("/"))
+async def admin_prepare_delete(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Нужно: Фамилия Имя.")
+        return
+    emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
+    if not emp:
+        await message.answer("Не найден.")
+        return
+    await state.update_data(delete_employee_id=emp.id, delete_employee_fio=f"{emp.last_name} {emp.first_name}")
+    await state.set_state(AdminStates.waiting_delete_confirm)
+    await message.answer(
+        f"Подтвердите удаление сотрудника: {emp.last_name} {emp.first_name}.\n"
+        "Это удалит сотрудника и связанные заказы.\n"
+        "Ответьте: ДА (для удаления) или Нет (для отмены).",
+        reply_markup=admin_main_kb(settings),
+    )
+
+
+@router.message(IsAdmin(), StateFilter(AdminStates.waiting_delete_confirm), F.text, ~F.text.startswith("/"))
+async def admin_confirm_delete(
+    message: Message,
+    state: FSMContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> None:
+    answer = (message.text or "").strip().casefold()
+    if answer in {"нет", "no", "n"}:
+        await state.clear()
+        await message.answer("Удаление отменено.", reply_markup=admin_main_kb(settings))
+        return
+    if answer not in {"да", "yes", "y"}:
+        await message.answer("Введите ДА для удаления или Нет для отмены.")
+        return
+    data = await state.get_data()
+    emp_id = data.get("delete_employee_id")
+    emp_fio = data.get("delete_employee_fio", "сотрудник")
+    if not isinstance(emp_id, int):
+        await state.clear()
+        await message.answer("Состояние удаления потеряно, начните заново.", reply_markup=admin_main_kb(settings))
+        return
+    db.delete_employee(conn, emp_id)
+    await state.clear()
+    await message.answer(f"{emp_fio} удалён из базы.", reply_markup=admin_main_kb(settings))
 
 
 @router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню всем")
