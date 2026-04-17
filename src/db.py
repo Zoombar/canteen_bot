@@ -30,6 +30,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             last_name TEXT NOT NULL,
             first_name TEXT NOT NULL,
             telegram_user_id INTEGER UNIQUE,
+            telegram_username TEXT,
             active INTEGER NOT NULL DEFAULT 1
         );
 
@@ -86,6 +87,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    cols = {
+        str(r["name"])
+        for r in conn.execute("PRAGMA table_info(employees)").fetchall()
+    }
+    if "telegram_username" not in cols:
+        conn.execute("ALTER TABLE employees ADD COLUMN telegram_username TEXT")
     conn.commit()
 
 
@@ -106,6 +113,7 @@ class EmployeeRow:
     last_name: str
     first_name: str
     telegram_user_id: int | None
+    telegram_username: str | None
     active: bool
 
 
@@ -137,7 +145,10 @@ def add_employee(
 
 
 def list_employees(conn: sqlite3.Connection, active_only: bool = True) -> list[EmployeeRow]:
-    q = "SELECT id, position, last_name, first_name, telegram_user_id, active FROM employees"
+    q = (
+        "SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active "
+        "FROM employees"
+    )
     if active_only:
         q += " WHERE active = 1"
     q += " ORDER BY last_name, first_name"
@@ -149,6 +160,7 @@ def list_employees(conn: sqlite3.Connection, active_only: bool = True) -> list[E
             last_name=r["last_name"],
             first_name=r["first_name"],
             telegram_user_id=r["telegram_user_id"],
+            telegram_username=r["telegram_username"],
             active=bool(r["active"]),
         )
         for r in rows
@@ -160,7 +172,7 @@ def find_employee_by_name_admin(
 ) -> EmployeeRow | None:
     row = conn.execute(
         """
-        SELECT id, position, last_name, first_name, telegram_user_id, active
+        SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active
         FROM employees
         WHERE last_name = ? AND first_name = ?
         """,
@@ -174,6 +186,7 @@ def find_employee_by_name_admin(
         last_name=row["last_name"],
         first_name=row["first_name"],
         telegram_user_id=row["telegram_user_id"],
+        telegram_username=row["telegram_username"],
         active=bool(row["active"]),
     )
 
@@ -181,7 +194,7 @@ def find_employee_by_name_admin(
 def find_employee_by_name(conn: sqlite3.Connection, last_name: str, first_name: str) -> EmployeeRow | None:
     row = conn.execute(
         """
-        SELECT id, position, last_name, first_name, telegram_user_id, active
+        SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active
         FROM employees
         WHERE last_name = ? AND first_name = ? AND active = 1
         """,
@@ -195,6 +208,7 @@ def find_employee_by_name(conn: sqlite3.Connection, last_name: str, first_name: 
         last_name=row["last_name"],
         first_name=row["first_name"],
         telegram_user_id=row["telegram_user_id"],
+        telegram_username=row["telegram_username"],
         active=bool(row["active"]),
     )
 
@@ -202,7 +216,7 @@ def find_employee_by_name(conn: sqlite3.Connection, last_name: str, first_name: 
 def get_employee_by_tg(conn: sqlite3.Connection, telegram_user_id: int) -> EmployeeRow | None:
     row = conn.execute(
         """
-        SELECT id, position, last_name, first_name, telegram_user_id, active
+        SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active
         FROM employees
         WHERE telegram_user_id = ? AND active = 1
         """,
@@ -216,22 +230,28 @@ def get_employee_by_tg(conn: sqlite3.Connection, telegram_user_id: int) -> Emplo
         last_name=row["last_name"],
         first_name=row["first_name"],
         telegram_user_id=row["telegram_user_id"],
+        telegram_username=row["telegram_username"],
         active=bool(row["active"]),
     )
 
 
-def link_employee_telegram(conn: sqlite3.Connection, employee_id: int, telegram_user_id: int) -> None:
+def link_employee_telegram(
+    conn: sqlite3.Connection,
+    employee_id: int,
+    telegram_user_id: int,
+    telegram_username: str | None = None,
+) -> None:
     with transaction(conn):
         conn.execute(
-            "UPDATE employees SET telegram_user_id = ? WHERE id = ?",
-            (telegram_user_id, employee_id),
+            "UPDATE employees SET telegram_user_id = ?, telegram_username = ? WHERE id = ?",
+            (telegram_user_id, telegram_username, employee_id),
         )
 
 
 def unlink_employee_telegram(conn: sqlite3.Connection, employee_id: int) -> None:
     with transaction(conn):
         conn.execute(
-            "UPDATE employees SET telegram_user_id = NULL WHERE id = ?",
+            "UPDATE employees SET telegram_user_id = NULL, telegram_username = NULL WHERE id = ?",
             (employee_id,),
         )
 

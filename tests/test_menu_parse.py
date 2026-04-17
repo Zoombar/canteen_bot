@@ -188,3 +188,35 @@ def test_parse_docx_table_multiple_item_cells() -> None:
 
     assert ("Пицца", 100.0) in pairs
     assert ("Чебурек", 70.0) in pairs
+
+
+def test_comma_list_with_single_trailing_price_beverages() -> None:
+    line = "Компот , кисель, каркадэ — 30.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Компот", 30.0) in cleaned
+    assert ("кисель", 30.0) in cleaned
+    assert ("каркадэ", 30.0) in cleaned
+
+
+def test_comma_list_with_single_trailing_price_condiments() -> None:
+    line = "Кетчуп, масло, сметана, майонез, , сгущенное молоко, гренки 20 — 10.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Кетчуп", 10.0) in cleaned
+    assert ("масло", 10.0) in cleaned
+    assert ("сметана", 10.0) in cleaned
+    assert ("майонез", 10.0) in cleaned
+    assert ("сгущенное молоко", 10.0) in cleaned
+    assert ("гренки 20", 10.0) in cleaned
+
+
+def test_comma_list_with_hyphen_price_and_volume() -> None:
+    line = "Компот,кисель 0.5 - 90.00"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Компот", 90.0) in cleaned
+    assert ("кисель 0.5", 90.0) in cleaned

@@ -102,7 +102,7 @@ _PRICE_RE = re.compile(
     (?P<name>.+?)
     [\s\u00a0]*                           # spaces
     (?P<price>\d+(?:[.,]\d{1,2})?)       # price
-    \s*(?:руб|р\.?)?\s*$                 # optional rub
+    \s*(?:руб|р\.?|₽)?\s*$               # optional rub
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -115,7 +115,7 @@ def _parse_price_token(token: str) -> float | None:
     s = s.replace("\u00a0", " ")
     s = re.sub(r"\s+", "", s)
     s = s.strip(".,;:()[]{}")
-    s = s.rstrip("рубРУБ.р")
+    s = s.rstrip("рубРУБ.р₽")
     m_dash = re.fullmatch(r"(\d+)-(\d{1,2})", s)
     if m_dash:
         rub = m_dash.group(1)
@@ -245,6 +245,48 @@ def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
     return out if len(out) >= 2 else None
 
 
+def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | None:
+    """
+    Строки вида:
+      "Компот, кисель, каркадэ — 30.00 ₽"
+      "Кетчуп, масло, сметана ... — 10.00 ₽"
+
+    Одна цена в конце применяется к каждому элементу списка.
+    """
+    single = _parse_line(line)
+    if single is None:
+        return None
+    # Не режем строки формата "... 0,5" без явных маркеров цены.
+    if not re.search(r"(?:[—–-]\s*\d)|₽|руб|р\.?\b", line, re.IGNORECASE):
+        return None
+    name, price = single
+    if "," not in name and ";" not in name:
+        return None
+
+    raw_parts = _split_top_level_by_commas(name)
+    if len(raw_parts) < 2:
+        return None
+
+    cleaned_parts: list[str] = []
+    for part in raw_parts:
+        p = part.strip()
+        if not p:
+            continue
+        # Убираем шум после вычитки из docx-таблиц (висячие тире/запятые).
+        p = p.strip(" \t\r\n,;:—–-")
+        p = re.sub(r"\s+", " ", p).strip()
+        if not p:
+            continue
+        # Слишком длинные куски чаще всего являются описанием одного блюда, а не списком.
+        if len(p.split()) > 5:
+            return None
+        cleaned_parts.append(p)
+
+    if len(cleaned_parts) < 2:
+        return None
+    return [(p, price) for p in cleaned_parts]
+
+
 def _parse_one_line_to_items(line: str) -> tuple[list[tuple[str, float]], bool]:
     multi = split_multi_price_line(line)
     if multi is not None and len(multi) >= 2:
@@ -253,6 +295,10 @@ def _parse_one_line_to_items(line: str) -> tuple[list[tuple[str, float]], bool]:
     multi_comma = split_multi_comma_price_line(line)
     if multi_comma is not None and len(multi_comma) >= 2:
         return multi_comma, True
+
+    comma_single_price = split_comma_list_with_single_price(line)
+    if comma_single_price is not None and len(comma_single_price) >= 2:
+        return comma_single_price, True
 
     single = _parse_line(line)
     if single:

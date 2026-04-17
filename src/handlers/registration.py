@@ -33,6 +33,7 @@ async def cmd_myid(message: Message) -> None:
 @router.message(Command("debug_admin"))
 async def cmd_debug_admin(message: Message, state: FSMContext, settings: Settings) -> None:
     uid = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
     admin = is_admin(uid, settings)
     if not admin:
         await message.answer(
@@ -152,7 +153,7 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
         await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
         return
     try:
-        db.link_employee_telegram(conn, emp.id, uid)
+        db.link_employee_telegram(conn, emp.id, uid, telegram_username=username)
     except sqlite3.IntegrityError:
         await message.answer("Этот Telegram уже привязан к другой записи. Обратитесь к администратору.")
         return

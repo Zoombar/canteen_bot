@@ -152,6 +152,7 @@ async def admin_do_bind_for_order(
         await message.answer("Нужно два слова: Фамилия Имя.")
         return
     uid = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
     last_name, first_name = parsed
     emp = db.find_employee_by_name(conn, last_name, first_name)
     if not emp:
@@ -178,7 +179,7 @@ async def admin_do_bind_for_order(
         await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
         return
     try:
-        db.link_employee_telegram(conn, emp.id, uid)
+        db.link_employee_telegram(conn, emp.id, uid, telegram_username=username)
     except sqlite3.IntegrityError:
         await message.answer("Этот Telegram уже привязан к другой записи. Обратитесь к администратору.")
         return
@@ -229,12 +230,13 @@ async def admin_list_employees(message: Message, conn: sqlite3.Connection, setti
     lines = []
     for r in rows:
         tg = r.telegram_user_id or "—"
+        tg_user = f"@{r.telegram_username}" if r.telegram_username else "—"
         st = "активен" if r.active else "отключён"
         pos = (r.position or "").strip()
         name = f"{r.last_name} {r.first_name}"
         if pos:
             name = f"{pos} — {name}"
-        lines.append(f"{r.id}. {name} | tg:{tg} | {st}")
+        lines.append(f"{r.id}. {name} | tg:{tg} | user:{tg_user} | {st}")
     text = "\n".join(lines)
     part = 3500
     for i in range(0, len(text), part):
@@ -481,7 +483,7 @@ async def admin_canteen_choose(message: Message, settings: Settings) -> None:
 async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
     fmt = cb.data.split(":", 1)[1]
     today = local_today(settings.tz)
-    pairs, block2 = aggregate_daily_canteen(conn, today)
+    items = aggregate_daily_canteen(conn, today)
     chat_id = settings.canteen_chat_id
     if not chat_id:
         await cb.answer("CANTEEN_CHAT_ID не задан.", show_alert=True)
@@ -490,7 +492,7 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
     caption = f"Сводка на {today.isoformat()}"
     bot = cb.bot
     if fmt == "txt":
-        text = format_canteen_text(pairs, block2)
+        text = format_canteen_text(items)
         chunk = 3800
         for i in range(0, len(text), chunk):
             await bot.send_message(chat_id, text[i : i + chunk])
@@ -498,7 +500,7 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
         await cb.answer()
         return
     if fmt == "xlsx":
-        data = build_canteen_excel_bytes(pairs, block2)
+        data = build_canteen_excel_bytes(items)
         fname = f"canteen_{today.isoformat()}.xlsx"
         await bot.send_document(
             chat_id,
@@ -506,7 +508,7 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
             caption=caption,
         )
     elif fmt == "csv":
-        data = build_canteen_csv_bytes(pairs, block2)
+        data = build_canteen_csv_bytes(items)
         fname = f"canteen_{today.isoformat()}.csv"
         await bot.send_document(
             chat_id,
