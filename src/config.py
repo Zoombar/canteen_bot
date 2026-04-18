@@ -42,6 +42,7 @@ class Settings:
     imap_password: str | None
     imap_sender_filter: str | None
     imap_only_unseen: bool
+    imap_urgent_after: str  # HH:MM — в будни после этого времени без меню опрос IMAP каждые 3 мин.
     test_mode: bool  # заказы в выходные + без дедлайна + команды /test_* для админов
     db_path: Path
 
@@ -67,6 +68,7 @@ def load_settings() -> Settings:
         imap_password=(os.getenv("IMAP_PASSWORD") or "").strip() or None,
         imap_sender_filter=(os.getenv("IMAP_SENDER_FILTER") or "").strip() or None,
         imap_only_unseen=_get_bool("IMAP_ONLY_UNSEEN", True),
+        imap_urgent_after=os.getenv("IMAP_URGENT_AFTER", "10:00").strip() or "10:00",
         test_mode=_get_bool("TEST_MODE", False),
         db_path=db_path,
     )

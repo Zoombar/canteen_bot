@@ -473,6 +473,12 @@ async def admin_canteen_choose(message: Message, settings: Settings) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(
+                    text="Все форматы (Excel+CSV+текст)",
+                    callback_data="can:all",
+                ),
+            ],
+            [
                 InlineKeyboardButton(text="Excel (.xlsx)", callback_data="can:xlsx"),
                 InlineKeyboardButton(text="CSV", callback_data="can:csv"),
             ],
@@ -494,6 +500,31 @@ async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settin
 
     caption = f"Сводка на {today.isoformat()}"
     bot = cb.bot
+    if fmt == "all":
+        xlsx_data = build_canteen_excel_bytes(items)
+        xlsx_name = f"canteen_{today.isoformat()}.xlsx"
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(xlsx_data, filename=xlsx_name),
+            caption=f"{caption} (Excel)",
+        )
+        csv_data = build_canteen_csv_bytes(items)
+        csv_name = f"canteen_{today.isoformat()}.csv"
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(csv_data, filename=csv_name),
+            caption=f"{caption} (CSV)",
+        )
+        text = format_canteen_text(items)
+        chunk = 3800
+        for i in range(0, len(text), chunk):
+            await bot.send_message(chat_id, text[i : i + chunk])
+        await cb.message.answer(
+            "Сводка отправлена: Excel, CSV и текстом.",
+            reply_markup=admin_main_kb(settings),
+        )
+        await cb.answer()
+        return
     if fmt == "txt":
         text = format_canteen_text(items)
         chunk = 3800

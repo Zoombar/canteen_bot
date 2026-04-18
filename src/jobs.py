@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, time, timedelta
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,7 +16,14 @@ from .imap_client import fetch_latest_docx_attachments
 from .menu_export import build_menu_txt_bytes
 from .menu_parse import parse_docx_bytes
 from .reports import build_monthly_xlsx, monthly_totals_by_employee
-from .timeutil import is_weekday, local_today, previous_month
+from .timeutil import (
+    is_weekday,
+    is_weekday_effective,
+    local_now,
+    local_today,
+    parse_hhmm,
+    previous_month,
+)
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup
 
 log = logging.getLogger(__name__)
@@ -128,6 +136,55 @@ async def test_broadcast_orders_closed(
     return f"Сообщение «заказы закрыты»: доставлено {ok} из {len(recipients)}.{extra}"
 
 
+def _has_menu_with_items_today(conn: sqlite3.Connection, settings: Settings) -> bool:
+    today = local_today(settings.tz)
+    mid = db.get_menu_for_date(conn, today)
+    if mid is None:
+        return False
+    return len(db.list_menu_items(conn, mid)) > 0
+
+
+def _next_weekday_broadcast_after(now: datetime, broadcast_t: time) -> datetime:
+    """Следующая рассылка меню (пн–пт) строго после момента now, в той же таймзоне."""
+    tz = now.tzinfo
+    if tz is None:
+        raise ValueError("now must be timezone-aware")
+    d = now.date()
+    for _ in range(14):
+        if d.weekday() < 5:
+            cand = datetime.combine(d, broadcast_t, tzinfo=tz)
+            if cand > now:
+                return cand
+        d += timedelta(days=1)
+    raise RuntimeError("could not find next weekday menu broadcast")
+
+
+def _imap_in_quiet_period(settings: Settings) -> bool:
+    """
+    Не трогать почту после закрытия заказов до «за час до открытия» следующего цикла
+    (время рассылки меню = начало приёма заказов на новый день).
+    """
+    now = local_now(settings.tz)
+    deadline_t = parse_hhmm(settings.order_deadline_time)
+    broadcast_t = parse_hhmm(settings.menu_broadcast_time)
+    next_b = _next_weekday_broadcast_after(now, broadcast_t)
+    resume = next_b - timedelta(hours=1)
+    if not is_weekday_effective(settings.tz):
+        return now < resume
+    today_deadline = datetime.combine(now.date(), deadline_t, tzinfo=now.tzinfo)
+    return now > today_deadline and now < resume
+
+
+def _imap_poll_is_urgent(conn: sqlite3.Connection, settings: Settings) -> bool:
+    """Будни, меню на сегодня ещё нет, локальное время уже после порога — чаще опрашивать почту."""
+    if not is_weekday(settings.tz):
+        return False
+    if _has_menu_with_items_today(conn, settings):
+        return False
+    now = local_now(settings.tz)
+    return now.time() >= parse_hhmm(settings.imap_urgent_after)
+
+
 async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         return
@@ -160,6 +217,23 @@ async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) ->
         db.create_menu(conn, today, "imap", items)
         db.mark_email_processed(conn, att.message_id)
         log.info("Menu from IMAP updated: %s items", len(items))
+
+
+async def process_imap_scheduled(
+    conn: sqlite3.Connection, settings: Settings, *, urgent_only: bool
+) -> None:
+    if not (settings.imap_host and settings.imap_user and settings.imap_password):
+        return
+    if _imap_in_quiet_period(settings):
+        return
+    if _has_menu_with_items_today(conn, settings):
+        return
+    urgent = _imap_poll_is_urgent(conn, settings)
+    if urgent_only and not urgent:
+        return
+    if not urgent_only and urgent:
+        return
+    await process_imap_and_menu(conn, settings)
 
 
 async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
@@ -256,10 +330,19 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
     h_m, m_m = settings.menu_broadcast_time.split(":")
 
     sched.add_job(
-        process_imap_and_menu,
+        process_imap_scheduled,
         IntervalTrigger(minutes=3),
         args=[conn, settings],
-        id="imap",
+        kwargs={"urgent_only": True},
+        id="imap_urgent",
+        replace_existing=True,
+    )
+    sched.add_job(
+        process_imap_scheduled,
+        IntervalTrigger(minutes=15),
+        args=[conn, settings],
+        kwargs={"urgent_only": False},
+        id="imap_slow",
         replace_existing=True,
     )
 
