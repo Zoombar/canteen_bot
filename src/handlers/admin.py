@@ -38,6 +38,99 @@ from .states import AdminStates
 
 router = Router(name="admin")
 
+# Список сотрудников в админке: столько кнопок на странице (плюс ряд навигации).
+EMP_LIST_PAGE_SIZE = 8
+# Текст на inline-кнопке — лимит Telegram.
+_EMP_BTN_MAX = 58
+
+
+def _emp_list_button_label(r: db.EmployeeRow) -> str:
+    st = "✓" if r.active else "✗"
+    name = f"{r.last_name} {r.first_name}".strip()
+    line = f"{st} {name}"
+    if len(line) <= _EMP_BTN_MAX:
+        return line
+    room = _EMP_BTN_MAX - len(st) - 2
+    if room < 6:
+        return line[:_EMP_BTN_MAX]
+    return f"{st} {name[:room]}…"
+
+
+def _format_employee_card(r: db.EmployeeRow) -> str:
+    tg = str(r.telegram_user_id) if r.telegram_user_id is not None else "—"
+    tg_user = f"@{r.telegram_username}" if r.telegram_username else "—"
+    st = "активен" if r.active else "отключён"
+    pos = (r.position or "").strip()
+    head = f"Сотрудник #{r.id} — {st}"
+    lines = [head, f"ФИО: {r.last_name} {r.first_name}"]
+    if pos:
+        lines.append(f"Должность: {pos}")
+    lines.append(f"Telegram ID: {tg}")
+    lines.append(f"Username: {tg_user}")
+    return "\n".join(lines)
+
+
+def _employee_list_text_and_kb(
+    conn: sqlite3.Connection, *, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    total = db.count_employees(conn, active_only=False)
+    if total == 0:
+        return (
+            "Список сотрудников пуст.",
+            InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    pages = max(1, (total + EMP_LIST_PAGE_SIZE - 1) // EMP_LIST_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    offset = page * EMP_LIST_PAGE_SIZE
+    rows = db.list_employees_page(conn, limit=EMP_LIST_PAGE_SIZE, offset=offset, active_only=False)
+    text = (
+        f"Сотрудники (всего {total}), страница {page + 1} из {pages}.\n"
+        "Нажмите на строку, чтобы открыть карточку и действия."
+    )
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        keyboard.append(
+            [InlineKeyboardButton(text=_emp_list_button_label(r), callback_data=f"emp:vw:{r.id}")]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"emp:pg:{page - 1}"))
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{pages}",
+            callback_data=f"emp:hi:{page}:{pages}",
+        )
+    )
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"emp:pg:{page + 1}"))
+    keyboard.append(nav)
+    return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _employee_view_kb(r: db.EmployeeRow, *, deleting: bool = False) -> InlineKeyboardMarkup:
+    if deleting:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Да, удалить", callback_data=f"emp:ok:{r.id}"),
+                    InlineKeyboardButton(text="Отмена", callback_data=f"emp:can:{r.id}"),
+                ],
+            ]
+        )
+    row_actions: list[InlineKeyboardButton] = []
+    if r.telegram_user_id is not None:
+        row_actions.append(InlineKeyboardButton(text="Снять привязку", callback_data=f"emp:ul:{r.id}"))
+    if r.active:
+        row_actions.append(InlineKeyboardButton(text="Отключить", callback_data=f"emp:off:{r.id}"))
+    else:
+        row_actions.append(InlineKeyboardButton(text="Включить", callback_data=f"emp:on:{r.id}"))
+    rows: list[list[InlineKeyboardButton]] = []
+    if row_actions:
+        rows.append(row_actions)
+    rows.append([InlineKeyboardButton(text="Удалить из базы", callback_data=f"emp:del:{r.id}")])
+    rows.append([InlineKeyboardButton(text="◀️ К списку", callback_data="emp:pg:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 class IsAdmin(BaseFilter):
     async def __call__(self, message: Message, settings: Settings) -> bool:
@@ -93,8 +186,8 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
         )
     else:
         bind_hint = (
-            "Для заказа еды сначала добавьте себя в список («Добавить сотрудника») "
-            "и выполните «Привязка для заказа»."
+            "Для заказа еды нажмите /start и введите фамилию и имя — запись создастся сама "
+            "или привяжется к уже существующей. Либо «Привязка для заказа»."
         )
     test_block = ""
     if settings.test_mode:
@@ -134,8 +227,8 @@ async def admin_bind_for_order(
         return
     await state.set_state(AdminStates.waiting_bind_fio)
     await message.answer(
-        "Введите фамилию и имя через пробел (как в списке).\n"
-        "Если вас ещё нет в списке — сначала нажмите «Добавить сотрудника»."
+        "Введите фамилию и имя через пробел.\n"
+        "Если записи ещё нет — она создастся автоматически (как при /start)."
     )
 
 
@@ -223,24 +316,156 @@ async def admin_do_add(
 
 @router.message(IsAdmin(), F.text == "Список сотрудников")
 async def admin_list_employees(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
-    rows = db.list_employees(conn, active_only=False)
-    if not rows:
-        await message.answer("Список пуст.", reply_markup=admin_main_kb(settings))
+    text, kb = _employee_list_text_and_kb(conn, page=0)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(IsAdminCb(), F.data.startswith("emp:"))
+async def admin_employees_ui_cb(
+    cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    raw = cb.data or ""
+    parts = raw.split(":")
+    if len(parts) < 2 or parts[0] != "emp":
+        await cb.answer()
         return
-    lines = []
-    for r in rows:
-        tg = r.telegram_user_id or "—"
-        tg_user = f"@{r.telegram_username}" if r.telegram_username else "—"
-        st = "активен" if r.active else "отключён"
-        pos = (r.position or "").strip()
-        name = f"{r.last_name} {r.first_name}"
-        if pos:
-            name = f"{pos} — {name}"
-        lines.append(f"{r.id}. {name} | tg:{tg} | user:{tg_user} | {st}")
-    text = "\n".join(lines)
-    part = 3500
-    for i in range(0, len(text), part):
-        await message.answer(text[i : i + part], reply_markup=admin_main_kb(settings) if i + part >= len(text) else None)
+
+    action = parts[1]
+
+    if action == "hi" and len(parts) == 4:
+        try:
+            p = int(parts[2])
+            ps = int(parts[3])
+        except ValueError:
+            await cb.answer()
+            return
+        await cb.answer(f"Страница {p + 1} из {ps}", show_alert=False)
+        return
+
+    def _int_tail(idx: int) -> int | None:
+        if len(parts) <= idx:
+            return None
+        try:
+            return int(parts[idx])
+        except ValueError:
+            return None
+
+    if action == "pg":
+        page = _int_tail(2)
+        if page is None:
+            await cb.answer()
+            return
+        text, kb = _employee_list_text_and_kb(conn, page=page)
+        await cb.message.edit_text(text, reply_markup=kb)
+        await cb.answer()
+        return
+
+    emp_id = _int_tail(2)
+    if emp_id is None and action not in {"hi"}:
+        await cb.answer()
+        return
+
+    if action == "vw":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Запись не найдена", show_alert=True)
+            return
+        await cb.message.edit_text(
+            _format_employee_card(r),
+            reply_markup=_employee_view_kb(r),
+        )
+        await cb.answer()
+        return
+
+    if action == "ul":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Не найдено", show_alert=True)
+            return
+        db.unlink_employee_telegram(conn, r.id)
+        r2 = db.get_employee_by_id(conn, emp_id)
+        if r2:
+            await cb.message.edit_text(
+                _format_employee_card(r2) + "\n\nПривязка Telegram снята.",
+                reply_markup=_employee_view_kb(r2),
+            )
+        await cb.answer("Готово")
+        return
+
+    if action == "off":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Не найдено", show_alert=True)
+            return
+        db.deactivate_employee(conn, r.id)
+        r2 = db.get_employee_by_id(conn, emp_id)
+        if r2:
+            await cb.message.edit_text(
+                _format_employee_card(r2) + "\n\nСотрудник отключён.",
+                reply_markup=_employee_view_kb(r2),
+            )
+        await cb.answer("Отключён")
+        return
+
+    if action == "on":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Не найдено", show_alert=True)
+            return
+        db.activate_employee(conn, r.id)
+        r2 = db.get_employee_by_id(conn, emp_id)
+        if r2:
+            await cb.message.edit_text(
+                _format_employee_card(r2) + "\n\nСотрудник снова активен.",
+                reply_markup=_employee_view_kb(r2),
+            )
+        await cb.answer("Включён")
+        return
+
+    if action == "del":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Не найдено", show_alert=True)
+            return
+        await cb.message.edit_text(
+            _format_employee_card(r)
+            + "\n\nУдалить сотрудника и все связанные заказы? Это необратимо.",
+            reply_markup=_employee_view_kb(r, deleting=True),
+        )
+        await cb.answer()
+        return
+
+    if action == "can":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            text, kb = _employee_list_text_and_kb(conn, page=0)
+            await cb.message.edit_text(text, reply_markup=kb)
+            await cb.answer("Отменено")
+            return
+        await cb.message.edit_text(
+            _format_employee_card(r),
+            reply_markup=_employee_view_kb(r),
+        )
+        await cb.answer("Отменено")
+        return
+
+    if action == "ok":
+        r = db.get_employee_by_id(conn, emp_id)
+        if not r:
+            await cb.answer("Уже удалён", show_alert=True)
+            text, kb = _employee_list_text_and_kb(conn, page=0)
+            await cb.message.edit_text(text, reply_markup=kb)
+            return
+        db.delete_employee(conn, emp_id)
+        text, kb = _employee_list_text_and_kb(conn, page=0)
+        await cb.message.edit_text(
+            f"Сотрудник {r.last_name} {r.first_name} удалён из базы.\n\n{text}",
+            reply_markup=kb,
+        )
+        await cb.answer("Удалено")
+        return
+
+    await cb.answer()
 
 
 @router.message(IsAdmin(), F.text == "Снять привязку")

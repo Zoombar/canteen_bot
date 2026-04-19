@@ -151,7 +151,7 @@ def list_employees(conn: sqlite3.Connection, active_only: bool = True) -> list[E
     )
     if active_only:
         q += " WHERE active = 1"
-    q += " ORDER BY last_name, first_name"
+    q += " ORDER BY last_name, first_name, id"
     rows = conn.execute(q).fetchall()
     return [
         EmployeeRow(
@@ -165,6 +165,64 @@ def list_employees(conn: sqlite3.Connection, active_only: bool = True) -> list[E
         )
         for r in rows
     ]
+
+
+def count_employees(conn: sqlite3.Connection, active_only: bool = False) -> int:
+    q = "SELECT COUNT(*) AS c FROM employees"
+    if active_only:
+        q += " WHERE active = 1"
+    row = conn.execute(q).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def list_employees_page(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    offset: int,
+    active_only: bool = False,
+) -> list[EmployeeRow]:
+    q = (
+        "SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active "
+        "FROM employees"
+    )
+    if active_only:
+        q += " WHERE active = 1"
+    q += " ORDER BY last_name, first_name, id LIMIT ? OFFSET ?"
+    rows = conn.execute(q, (limit, offset)).fetchall()
+    return [
+        EmployeeRow(
+            id=r["id"],
+            position=r["position"],
+            last_name=r["last_name"],
+            first_name=r["first_name"],
+            telegram_user_id=r["telegram_user_id"],
+            telegram_username=r["telegram_username"],
+            active=bool(r["active"]),
+        )
+        for r in rows
+    ]
+
+
+def get_employee_by_id(conn: sqlite3.Connection, employee_id: int) -> EmployeeRow | None:
+    row = conn.execute(
+        """
+        SELECT id, position, last_name, first_name, telegram_user_id, telegram_username, active
+        FROM employees WHERE id = ?
+        """,
+        (employee_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return EmployeeRow(
+        id=row["id"],
+        position=row["position"],
+        last_name=row["last_name"],
+        first_name=row["first_name"],
+        telegram_user_id=row["telegram_user_id"],
+        telegram_username=row["telegram_username"],
+        active=bool(row["active"]),
+    )
 
 
 def find_employee_by_name_admin(

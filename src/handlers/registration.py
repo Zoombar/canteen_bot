@@ -75,7 +75,11 @@ async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connectio
         return
 
     await state.set_state(RegStates.waiting_name)
-    text = "Введите фамилию и имя через пробел, как в списке сотрудников.\nПример: Иванов Иван"
+    text = (
+        "Введите фамилию и имя через пробел (как вам удобно для заказов).\n"
+        "Пример: Иванов Иван\n\n"
+        "Если вас ещё нет в базе — запись создастся автоматически и привяжется к этому Telegram."
+    )
     if is_admin(uid, settings):
         text += "\nАдминка — кнопка «Админ-панель» после привязки."
     await message.answer(text, reply_markup=None)
@@ -86,6 +90,7 @@ async def cmd_start(message: Message, state: FSMContext, conn: sqlite3.Connectio
 async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connection, settings: Settings) -> None:
     raw = (message.text or "").strip()
     uid = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
     admin = is_admin(uid, settings)
 
     if raw == "Админ-панель" and admin:
@@ -126,29 +131,25 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
     last_name, first_name = parts[0], parts[1]
     emp = db.find_employee_by_name(conn, last_name, first_name)
     if not emp:
-        if admin:
-            # Для админа разрешаем саморегистрацию: создаём запись сотрудника при первом вводе ФИО.
-            try:
-                new_id = db.add_employee(conn, last_name, first_name)
-            except sqlite3.IntegrityError:
-                existing = db.find_employee_by_name_admin(conn, last_name, first_name)
-                if not existing:
-                    await message.answer("Не удалось создать сотрудника, попробуйте ещё раз.")
-                    return
-                if not existing.active:
-                    db.activate_employee(conn, existing.id)
-                emp = db.find_employee_by_name(conn, last_name, first_name)
-                if not emp:
-                    await message.answer("Не удалось активировать сотрудника, попробуйте ещё раз.")
-                    return
-            else:
-                emp = db.find_employee_by_name(conn, last_name, first_name)
-                if not emp:
-                    await message.answer(f"Сотрудник создан (id={new_id}), но привязка не удалась. Повторите /start.")
-                    return
+        # Саморегистрация: при первом вводе ФИО создаём сотрудника и привязываем Telegram.
+        try:
+            new_id = db.add_employee(conn, last_name, first_name)
+        except sqlite3.IntegrityError:
+            existing = db.find_employee_by_name_admin(conn, last_name, first_name)
+            if not existing:
+                await message.answer("Не удалось создать сотрудника, попробуйте ещё раз.")
+                return
+            if not existing.active:
+                db.activate_employee(conn, existing.id)
+            emp = db.find_employee_by_name(conn, last_name, first_name)
+            if not emp:
+                await message.answer("Не удалось активировать сотрудника, попробуйте ещё раз.")
+                return
         else:
-            await message.answer("Сотрудник не найден. Проверьте написание или обратитесь к администратору.")
-            return
+            emp = db.find_employee_by_name(conn, last_name, first_name)
+            if not emp:
+                await message.answer(f"Сотрудник создан (id={new_id}), но привязка не удалась. Повторите /start.")
+                return
     if emp.telegram_user_id is not None and emp.telegram_user_id != uid:
         await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
         return
