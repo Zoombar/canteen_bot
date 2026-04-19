@@ -182,12 +182,14 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
     if emp:
         bind_hint = (
             f"Вы привязаны как {emp.last_name} {emp.first_name}.\n"
-            "Заказ — кнопками «Заказ на сегодня» и «Корзина»."
+            "Заказ — кнопками «Заказ на сегодня» и «Корзина».\n"
+            "Снять свою привязку: «Список сотрудников» → ваша карточка → «Снять привязку»."
         )
     else:
         bind_hint = (
             "Для заказа еды нажмите /start и введите фамилию и имя — запись создастся сама "
-            "или привяжется к уже существующей. Либо «Привязка для заказа»."
+            "или привяжется к уже существующей. Либо «Привязка для заказа».\n"
+            "Снять привязку с аккаунта — «Список сотрудников», откройте свою карточку."
         )
     test_block = ""
     if settings.test_mode:
@@ -196,7 +198,7 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
         )
     return (
         "Админ-панель.\n\n"
-        "Сотрудники и меню — через кнопки ниже."
+        "Управление сотрудниками — «Список сотрудников» (карточка записи). Меню и отчёты — кнопками ниже."
         f"{test_block}\n"
         f"{bind_hint}"
     )
@@ -222,7 +224,7 @@ async def admin_bind_for_order(
     if db.get_employee_by_tg(conn, uid):
         await message.answer(
             "Telegram уже привязан к сотруднику — заказывайте через «Заказ на сегодня». "
-            "Снять привязку можно кнопкой «Снять привязку»."
+            "Снять привязку: «Список сотрудников» → ваша карточка → «Снять привязку»."
         )
         return
     await state.set_state(AdminStates.waiting_bind_fio)
@@ -281,37 +283,6 @@ async def admin_do_bind_for_order(
         "Привязка выполнена. Заказ — «Заказ на сегодня» или «Корзина».",
         reply_markup=admin_main_kb(settings),
     )
-
-
-@router.message(IsAdmin(), F.text == "Добавить сотрудника")
-async def admin_prompt_add(message: Message, state: FSMContext, settings: Settings) -> None:
-    await state.set_state(AdminStates.waiting_add_fio)
-    await message.answer(
-        "Введите фамилию и имя нового сотрудника через пробел.\n"
-        "Пример: Иванов Иван",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_add_fio), F.text, ~F.text.startswith("/"))
-async def admin_do_add(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    parsed = _parse_fio((message.text or "").strip())
-    if not parsed:
-        await message.answer("Нужно два слова: Фамилия Имя.")
-        return
-    last_name, first_name = parsed
-    try:
-        eid = db.add_employee(conn, last_name, first_name)
-    except sqlite3.IntegrityError:
-        await message.answer("Такой сотрудник уже есть (ФИО должно быть уникальным).")
-        return
-    await state.clear()
-    await message.answer(f"Сотрудник добавлен, id={eid}.", reply_markup=admin_main_kb(settings))
 
 
 @router.message(IsAdmin(), F.text == "Список сотрудников")
@@ -466,125 +437,6 @@ async def admin_employees_ui_cb(
         return
 
     await cb.answer()
-
-
-@router.message(IsAdmin(), F.text == "Снять привязку")
-async def admin_prompt_unlink(message: Message, state: FSMContext, settings: Settings) -> None:
-    await state.set_state(AdminStates.waiting_unlink_fio)
-    await message.answer(
-        "Введите фамилию и имя сотрудника, у которого сбросить привязку Telegram.",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_unlink_fio), F.text, ~F.text.startswith("/"))
-async def admin_do_unlink(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Нужно: Фамилия Имя.")
-        return
-    emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
-    if not emp:
-        await message.answer("Не найден.")
-        return
-    db.unlink_employee_telegram(conn, emp.id)
-    await state.clear()
-    await message.answer("Привязка Telegram сброшена.", reply_markup=admin_main_kb(settings))
-
-
-@router.message(IsAdmin(), F.text == "Отключить сотрудника")
-async def admin_prompt_deactivate(message: Message, state: FSMContext, settings: Settings) -> None:
-    await state.set_state(AdminStates.waiting_deactivate_fio)
-    await message.answer(
-        "Введите фамилию и имя сотрудника для отключения.",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_deactivate_fio), F.text, ~F.text.startswith("/"))
-async def admin_do_deactivate(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Нужно: Фамилия Имя.")
-        return
-    emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
-    if not emp:
-        await message.answer("Не найден.")
-        return
-    db.deactivate_employee(conn, emp.id)
-    await state.clear()
-    await message.answer("Сотрудник отключён.", reply_markup=admin_main_kb(settings))
-
-
-@router.message(IsAdmin(), F.text == "Удалить сотрудника")
-async def admin_prompt_delete(message: Message, state: FSMContext, settings: Settings) -> None:
-    await state.set_state(AdminStates.waiting_delete_fio)
-    await message.answer(
-        "Введите фамилию и имя сотрудника для ПОЛНОГО удаления из базы.",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_delete_fio), F.text, ~F.text.startswith("/"))
-async def admin_prepare_delete(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Нужно: Фамилия Имя.")
-        return
-    emp = db.find_employee_by_name_admin(conn, parts[0], parts[1])
-    if not emp:
-        await message.answer("Не найден.")
-        return
-    await state.update_data(delete_employee_id=emp.id, delete_employee_fio=f"{emp.last_name} {emp.first_name}")
-    await state.set_state(AdminStates.waiting_delete_confirm)
-    await message.answer(
-        f"Подтвердите удаление сотрудника: {emp.last_name} {emp.first_name}.\n"
-        "Это удалит сотрудника и связанные заказы.\n"
-        "Ответьте: ДА (для удаления) или Нет (для отмены).",
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_delete_confirm), F.text, ~F.text.startswith("/"))
-async def admin_confirm_delete(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    answer = (message.text or "").strip().casefold()
-    if answer in {"нет", "no", "n"}:
-        await state.clear()
-        await message.answer("Удаление отменено.", reply_markup=admin_main_kb(settings))
-        return
-    if answer not in {"да", "yes", "y"}:
-        await message.answer("Введите ДА для удаления или Нет для отмены.")
-        return
-    data = await state.get_data()
-    emp_id = data.get("delete_employee_id")
-    emp_fio = data.get("delete_employee_fio", "сотрудник")
-    if not isinstance(emp_id, int):
-        await state.clear()
-        await message.answer("Состояние удаления потеряно, начните заново.", reply_markup=admin_main_kb(settings))
-        return
-    db.delete_employee(conn, emp_id)
-    await state.clear()
-    await message.answer(f"{emp_fio} удалён из базы.", reply_markup=admin_main_kb(settings))
 
 
 @router.message(IsAdmin(), IsTestMode(), F.text == "Тест: меню всем")
