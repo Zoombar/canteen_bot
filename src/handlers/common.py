@@ -12,14 +12,14 @@ def is_admin(user_id: int, settings: Settings) -> bool:
 
 
 class OrderUiNotBlocked(BaseFilter):
-    """Не открывать заказ, пока идёт ввод ФИО (регистрация или админ-формы)."""
+    """Не открывать заказ, пока идёт ввод ФИО при регистрации (/start)."""
 
     async def __call__(self, event: Message | CallbackQuery, state: FSMContext) -> bool:
         s = await state.get_state()
         if s is None:
             return True
         ss = str(s)
-        return not (ss.startswith("RegStates:") or ss.startswith("AdminStates:"))
+        return not ss.startswith("RegStates:")
 
 
 def employee_main_kb() -> ReplyKeyboardMarkup:
@@ -36,10 +36,7 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = [
         [KeyboardButton(text="Админ-панель")],
         [KeyboardButton(text="Список сотрудников")],
-        [
-            KeyboardButton(text="Загрузить меню"),
-            KeyboardButton(text="Сводка столовой"),
-        ],
+        [KeyboardButton(text="Загрузить меню")],
         [KeyboardButton(text="Месячный отчёт")],
     ]
     if settings.test_mode:
@@ -67,7 +64,6 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
                 KeyboardButton(text="Корзина"),
                 KeyboardButton(text="Помощь"),
             ],
-            [KeyboardButton(text="Привязка для заказа")],
         ]
     )
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)

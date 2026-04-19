@@ -4,15 +4,9 @@ import io
 import sqlite3
 
 from aiogram import F, Router
-from aiogram.filters import BaseFilter, Command, StateFilter
+from aiogram.filters import BaseFilter, Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    BufferedInputFile,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import db
 from ..config import Settings
@@ -22,19 +16,12 @@ from ..jobs import (
     test_broadcast_orders_closed,
 )
 from ..menu_parse import parse_docx_bytes
-from ..reports import (
-    aggregate_daily_canteen,
-    build_canteen_csv_bytes,
-    build_canteen_excel_bytes,
-    format_canteen_text,
-)
 from ..timeutil import (
     local_today,
     set_test_deadline_override,
     set_test_weekday_override,
 )
 from .common import admin_main_kb, is_admin
-from .states import AdminStates
 
 router = Router(name="admin")
 
@@ -170,13 +157,6 @@ async def test_commands_disabled_hint(message: Message) -> None:
     )
 
 
-def _parse_fio(text: str) -> tuple[str, str] | None:
-    parts = text.split()
-    if len(parts) < 2:
-        return None
-    return parts[0], parts[1]
-
-
 def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) -> str:
     emp = db.get_employee_by_tg(conn, uid)
     if emp:
@@ -188,7 +168,7 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
     else:
         bind_hint = (
             "Для заказа еды нажмите /start и введите фамилию и имя — запись создастся сама "
-            "или привяжется к уже существующей. Либо «Привязка для заказа».\n"
+            "или привяжется к уже существующей.\n"
             "Снять привязку с аккаунта — «Список сотрудников», откройте свою карточку."
         )
     test_block = ""
@@ -198,7 +178,9 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
         )
     return (
         "Админ-панель.\n\n"
-        "Управление сотрудниками — «Список сотрудников» (карточка записи). Меню и отчёты — кнопками ниже."
+        "Управление сотрудниками — «Список сотрудников» (карточка записи). Меню и отчёты — кнопками ниже.\n"
+        f"Сводка для столовой уходит в чат (CANTEEN_CHAT_ID в .env) автоматически в {settings.order_deadline_time} "
+        "в будни, в момент дедлайна заказов."
         f"{test_block}\n"
         f"{bind_hint}"
     )
@@ -210,77 +192,6 @@ async def admin_panel(message: Message, conn: sqlite3.Connection, settings: Sett
     uid = message.from_user.id if message.from_user else 0
     await message.answer(
         _admin_panel_text(conn, uid, settings),
-        reply_markup=admin_main_kb(settings),
-    )
-
-
-@router.message(IsAdmin(), F.text == "Привязка для заказа")
-async def admin_bind_for_order(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-) -> None:
-    uid = message.from_user.id if message.from_user else 0
-    if db.get_employee_by_tg(conn, uid):
-        await message.answer(
-            "Telegram уже привязан к сотруднику — заказывайте через «Заказ на сегодня». "
-            "Снять привязку: «Список сотрудников» → ваша карточка → «Снять привязку»."
-        )
-        return
-    await state.set_state(AdminStates.waiting_bind_fio)
-    await message.answer(
-        "Введите фамилию и имя через пробел.\n"
-        "Если записи ещё нет — она создастся автоматически (как при /start)."
-    )
-
-
-@router.message(IsAdmin(), StateFilter(AdminStates.waiting_bind_fio), F.text, ~F.text.startswith("/"))
-async def admin_do_bind_for_order(
-    message: Message,
-    state: FSMContext,
-    conn: sqlite3.Connection,
-    settings: Settings,
-) -> None:
-    raw = (message.text or "").strip()
-    parsed = _parse_fio(raw)
-    if not parsed:
-        await message.answer("Нужно два слова: Фамилия Имя.")
-        return
-    uid = message.from_user.id if message.from_user else 0
-    username = message.from_user.username if message.from_user else None
-    last_name, first_name = parsed
-    emp = db.find_employee_by_name(conn, last_name, first_name)
-    if not emp:
-        # Для админа в этом сценарии разрешаем создать себя в списке сотрудников.
-        try:
-            new_id = db.add_employee(conn, last_name, first_name)
-        except sqlite3.IntegrityError:
-            existing = db.find_employee_by_name_admin(conn, last_name, first_name)
-            if not existing:
-                await message.answer("Не удалось создать сотрудника, попробуйте ещё раз.")
-                return
-            if not existing.active:
-                db.activate_employee(conn, existing.id)
-            emp = db.find_employee_by_name(conn, last_name, first_name)
-            if not emp:
-                await message.answer("Не удалось активировать сотрудника, попробуйте ещё раз.")
-                return
-        else:
-            emp = db.find_employee_by_name(conn, last_name, first_name)
-            if not emp:
-                await message.answer(f"Сотрудник создан (id={new_id}), но привязка не удалась. Повторите /start.")
-                return
-    if emp.telegram_user_id is not None and emp.telegram_user_id != uid:
-        await message.answer("Этот сотрудник уже привязан к другому Telegram-аккаунту.")
-        return
-    try:
-        db.link_employee_telegram(conn, emp.id, uid, telegram_username=username)
-    except sqlite3.IntegrityError:
-        await message.answer("Этот Telegram уже привязан к другой записи. Обратитесь к администратору.")
-        return
-    await state.clear()
-    await message.answer(
-        "Привязка выполнена. Заказ — «Заказ на сегодня» или «Корзина».",
         reply_markup=admin_main_kb(settings),
     )
 
@@ -543,94 +454,6 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
         f"Меню на {today.isoformat()} загружено, позиций: {len(items)}.",
         reply_markup=admin_main_kb(settings),
     )
-
-
-@router.message(IsAdmin(), F.text == "Сводка столовой")
-async def admin_canteen_choose(message: Message, settings: Settings) -> None:
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Все форматы (Excel+CSV+текст)",
-                    callback_data="can:all",
-                ),
-            ],
-            [
-                InlineKeyboardButton(text="Excel (.xlsx)", callback_data="can:xlsx"),
-                InlineKeyboardButton(text="CSV", callback_data="can:csv"),
-            ],
-            [InlineKeyboardButton(text="Текстом", callback_data="can:txt")],
-        ]
-    )
-    await message.answer("Как отправить сводку в чат столовой?", reply_markup=kb)
-
-
-@router.callback_query(IsAdminCb(), F.data.startswith("can:"))
-async def admin_canteen_send(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
-    fmt = cb.data.split(":", 1)[1]
-    today = local_today(settings.tz)
-    items = aggregate_daily_canteen(conn, today)
-    chat_id = settings.canteen_chat_id
-    if not chat_id:
-        await cb.answer("CANTEEN_CHAT_ID не задан.", show_alert=True)
-        return
-
-    caption = f"Сводка на {today.isoformat()}"
-    bot = cb.bot
-    if fmt == "all":
-        xlsx_data = build_canteen_excel_bytes(items)
-        xlsx_name = f"canteen_{today.isoformat()}.xlsx"
-        await bot.send_document(
-            chat_id,
-            document=BufferedInputFile(xlsx_data, filename=xlsx_name),
-            caption=f"{caption} (Excel)",
-        )
-        csv_data = build_canteen_csv_bytes(items)
-        csv_name = f"canteen_{today.isoformat()}.csv"
-        await bot.send_document(
-            chat_id,
-            document=BufferedInputFile(csv_data, filename=csv_name),
-            caption=f"{caption} (CSV)",
-        )
-        text = format_canteen_text(items)
-        chunk = 3800
-        for i in range(0, len(text), chunk):
-            await bot.send_message(chat_id, text[i : i + chunk])
-        await cb.message.answer(
-            "Сводка отправлена: Excel, CSV и текстом.",
-            reply_markup=admin_main_kb(settings),
-        )
-        await cb.answer()
-        return
-    if fmt == "txt":
-        text = format_canteen_text(items)
-        chunk = 3800
-        for i in range(0, len(text), chunk):
-            await bot.send_message(chat_id, text[i : i + chunk])
-        await cb.message.answer("Сводка отправлена текстом.", reply_markup=admin_main_kb(settings))
-        await cb.answer()
-        return
-    if fmt == "xlsx":
-        data = build_canteen_excel_bytes(items)
-        fname = f"canteen_{today.isoformat()}.xlsx"
-        await bot.send_document(
-            chat_id,
-            document=BufferedInputFile(data, filename=fname),
-            caption=caption,
-        )
-    elif fmt == "csv":
-        data = build_canteen_csv_bytes(items)
-        fname = f"canteen_{today.isoformat()}.csv"
-        await bot.send_document(
-            chat_id,
-            document=BufferedInputFile(data, filename=fname),
-            caption=caption,
-        )
-    else:
-        await cb.answer("Неизвестный формат", show_alert=True)
-        return
-    await cb.message.answer("Сводка отправлена файлом.", reply_markup=admin_main_kb(settings))
-    await cb.answer()
 
 
 @router.message(IsAdmin(), F.text == "Месячный отчёт")

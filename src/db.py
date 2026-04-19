@@ -85,6 +85,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
             year_month TEXT PRIMARY KEY,
             sent_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS canteen_summaries_sent (
+            summary_date TEXT PRIMARY KEY,
+            sent_at TEXT NOT NULL
+        );
         """
     )
     cols = {
@@ -598,6 +603,25 @@ def mark_monthly_report_sent(conn: sqlite3.Connection, year_month: str) -> None:
         )
 
 
+def was_canteen_summary_sent(conn: sqlite3.Connection, d: date) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM canteen_summaries_sent WHERE summary_date = ?",
+        (d.isoformat(),),
+    ).fetchone()
+    return row is not None
+
+
+def mark_canteen_summary_sent(conn: sqlite3.Connection, d: date) -> None:
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO canteen_summaries_sent (summary_date, sent_at)
+            VALUES (?, ?)
+            """,
+            (d.isoformat(), datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+
+
 def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
     """
     Полный сброс рабочих данных бота (как "новая" база без миграций):
@@ -612,3 +636,4 @@ def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM processed_emails")
         conn.execute("DELETE FROM menu_broadcasts")
         conn.execute("DELETE FROM monthly_reports_sent")
+        conn.execute("DELETE FROM canteen_summaries_sent")

@@ -15,7 +15,14 @@ from .handlers.common import employee_main_kb
 from .imap_client import fetch_latest_docx_attachments
 from .menu_export import build_menu_txt_bytes
 from .menu_parse import parse_docx_bytes
-from .reports import build_monthly_xlsx, monthly_totals_by_employee
+from .reports import (
+    aggregate_daily_canteen,
+    build_canteen_csv_bytes,
+    build_canteen_excel_bytes,
+    build_monthly_xlsx,
+    format_canteen_text,
+    monthly_totals_by_employee,
+)
 from .timeutil import (
     is_weekday,
     is_weekday_effective,
@@ -278,6 +285,52 @@ def _collect_no_order_recipients(conn: sqlite3.Connection, settings: Settings) -
     return recipients
 
 
+_CANTEEN_TEXT_CHUNK = 3800
+
+
+async def auto_send_canteen_summary_weekday(
+    bot: Bot, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """
+    После дедлайна заказов (по cron в ORDER_DEADLINE_TIME, пн–пт):
+    отправка сводки в CANTEEN_CHAT_ID (Excel + CSV + текст), один раз за календарный день.
+    """
+    if not is_weekday(settings.tz):
+        return
+    today = local_today(settings.tz)
+    if db.was_canteen_summary_sent(conn, today):
+        return
+    chat_id = settings.canteen_chat_id
+    if not chat_id:
+        log.warning("CANTEEN_CHAT_ID не задан — автосводка для %s не отправлена", today)
+        return
+    items = aggregate_daily_canteen(conn, today)
+    caption = f"Сводка на {today.isoformat()}"
+    try:
+        xlsx_data = build_canteen_excel_bytes(items)
+        xlsx_name = f"canteen_{today.isoformat()}.xlsx"
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(xlsx_data, filename=xlsx_name),
+            caption=f"{caption} (Excel)",
+        )
+        csv_data = build_canteen_csv_bytes(items)
+        csv_name = f"canteen_{today.isoformat()}.csv"
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(csv_data, filename=csv_name),
+            caption=f"{caption} (CSV)",
+        )
+        text = format_canteen_text(items)
+        for i in range(0, len(text), _CANTEEN_TEXT_CHUNK):
+            await bot.send_message(chat_id, text[i : i + _CANTEEN_TEXT_CHUNK])
+    except Exception as e:  # noqa: BLE001
+        log.exception("Автосводка столовой на %s не доставлена: %s", today, e)
+        return
+    db.mark_canteen_summary_sent(conn, today)
+    log.info("Автосводка столовой отправлена за %s", today)
+
+
 async def remind_no_order_users(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
     if not is_weekday(settings.tz):
         return
@@ -328,6 +381,7 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
     sched = AsyncIOScheduler(timezone=settings.tz)
 
     h_m, m_m = settings.menu_broadcast_time.split(":")
+    h_d, m_d = settings.order_deadline_time.split(":")
 
     sched.add_job(
         process_imap_scheduled,
@@ -364,6 +418,19 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
         CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=settings.tz),
         args=[bot, conn, settings],
         id="no_order_reminder",
+        replace_existing=True,
+    )
+
+    sched.add_job(
+        auto_send_canteen_summary_weekday,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=int(h_d),
+            minute=int(m_d),
+            timezone=settings.tz,
+        ),
+        args=[bot, conn, settings],
+        id="canteen_auto_summary",
         replace_existing=True,
     )
 
