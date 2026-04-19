@@ -210,6 +210,31 @@ def _split_top_level_by_commas(s: str) -> list[str]:
     return parts
 
 
+# Объём/вес «0,5» или «10,5» — не разделитель списка блюд при split по запятым.
+_VOL_DECIMAL_COMMA_RE = re.compile(r"(?<![\d,])(\d+,\d{1,2})(?!\d)")
+
+
+def _protect_volume_decimal_commas(s: str) -> tuple[str, dict[str, str]]:
+    """Временно убирает запятую в десятичных дробях (0,5 л), чтобы _split_top_level_by_commas не резал имя."""
+    tokens: dict[str, str] = {}
+    n = 0
+
+    def repl(m: re.Match[str]) -> str:
+        nonlocal n
+        key = f"\x00dc{n}\x00"
+        tokens[key] = m.group(1)
+        n += 1
+        return key
+
+    return _VOL_DECIMAL_COMMA_RE.sub(repl, s), tokens
+
+
+def _restore_volume_decimal_commas(s: str, tokens: dict[str, str]) -> str:
+    for k, v in tokens.items():
+        s = s.replace(k, v)
+    return s
+
+
 _EXPLICIT_RUB_TOKEN_RE = re.compile(
     r"\d+(?:[.,]\d{1,2})?\s*(?:руб|р\.?|р)\b",
     re.IGNORECASE,
@@ -223,10 +248,12 @@ def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
     s = line.strip()
     s = s.strip(" \t\r\n")
 
-    raw_parts = _split_top_level_by_commas(s)
+    s_masked, dc_toks = _protect_volume_decimal_commas(s)
+    raw_parts = _split_top_level_by_commas(s_masked)
     out: list[tuple[str, float]] = []
 
     for part in raw_parts:
+        part = _restore_volume_decimal_commas(part.strip(), dc_toks)
         part = part.strip().strip(".,;:")
         if not part:
             continue
@@ -263,13 +290,14 @@ def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | N
     if "," not in name and ";" not in name:
         return None
 
-    raw_parts = _split_top_level_by_commas(name)
+    name_masked, dc_toks = _protect_volume_decimal_commas(name)
+    raw_parts = _split_top_level_by_commas(name_masked)
     if len(raw_parts) < 2:
         return None
 
     cleaned_parts: list[str] = []
     for part in raw_parts:
-        p = part.strip()
+        p = _restore_volume_decimal_commas(part.strip(), dc_toks)
         if not p:
             continue
         # Убираем шум после вычитки из docx-таблиц (висячие тире/запятые).

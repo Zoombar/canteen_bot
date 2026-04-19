@@ -220,3 +220,14 @@ def test_comma_list_with_hyphen_price_and_volume() -> None:
     cleaned = [(sanitize_dish_name(n), p) for n, p in items]
     assert ("Компот", 90.0) in cleaned
     assert ("кисель 0.5", 90.0) in cleaned
+
+
+def test_comma_list_volume_with_decimal_comma_not_split() -> None:
+    """Запятая в 0,5 л — не разделитель списка (иначе получаются «кисель 0» и «5»)."""
+    line = "Компот, кисель 0,5 — 90.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Компот", 90.0) in cleaned
+    assert ("кисель 0,5", 90.0) in cleaned
+    assert all(p == 90.0 for _, p in cleaned)
