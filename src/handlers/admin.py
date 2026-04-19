@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db
 from ..config import Settings
 from ..jobs import (
+    process_imap_and_menu,
     send_monthly_report_previous,
     test_broadcast_menu_now,
     test_broadcast_orders_closed,
@@ -416,7 +417,7 @@ async def btn_test_reset(message: Message, conn: sqlite3.Connection, settings: S
 
 
 @router.message(IsAdmin(), IsTestMode(), F.text == "Тест: проверить IMAP")
-async def btn_test_imap(message: Message, settings: Settings) -> None:
+async def btn_test_imap(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         await message.answer(
             "IMAP не настроен: в .env нужны IMAP_HOST, IMAP_USER, IMAP_PASSWORD.",
@@ -438,6 +439,28 @@ async def btn_test_imap(message: Message, settings: Settings) -> None:
         await message.answer(
             text[i : i + part],
             reply_markup=admin_main_kb(settings) if i + part >= len(text) else None,
+        )
+    await message.answer("Забираю меню из почты в базу (только в тесте после проверки)…")
+    await process_imap_and_menu(conn, settings)
+    today = local_today(settings.tz)
+    mid = db.get_menu_for_date(conn, today)
+    if mid:
+        items = db.list_menu_items(conn, mid)
+        if items:
+            await message.answer(
+                f"Меню на {today} в базе: {len(items)} позиций.",
+                reply_markup=admin_main_kb(settings),
+            )
+        else:
+            await message.answer(
+                "Запись меню есть, но список блюд пуст — проверьте разбор .docx в логах.",
+                reply_markup=admin_main_kb(settings),
+            )
+    else:
+        await message.answer(
+            "Меню на сегодня в базе не создано: нет подходящего .docx в почте, "
+            "в файле нет строк меню, или письмо уже было обработано ранее (см. логи IMAP poll).",
+            reply_markup=admin_main_kb(settings),
         )
 
 

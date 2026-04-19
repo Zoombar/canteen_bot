@@ -40,6 +40,20 @@ def _sender_matches(from_hdr: str, filt: str | None) -> bool:
     return filt.lower() in (from_hdr or "").lower()
 
 
+def _raw_message_from_fetch(msg_data: list | None) -> bytes | None:
+    """Достаёт RFC822 bytes из ответа IMAP4.fetch (одиночное сообщение)."""
+    if not msg_data or not msg_data[0]:
+        return None
+    chunk = msg_data[0]
+    if isinstance(chunk, tuple) and len(chunk) >= 2:
+        raw = chunk[1]
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+    if isinstance(chunk, (bytes, bytearray)):
+        return bytes(chunk)
+    return None
+
+
 def fetch_latest_docx_attachments(
     host: str,
     port: int,
@@ -74,13 +88,20 @@ def fetch_latest_docx_attachments(
         log.info("IMAP fetch: найдено писем по %s: %s", crit, len(ids))
         # oldest first -> process newest last
         for eid in ids:
-            typ, msg_data = M.fetch(eid, "(RFC822)")
-            if typ != "OK" or not msg_data or not msg_data[0]:
-                log.warning("IMAP fetch: не удалось FETCH id=%s typ=%s", eid, typ)
-                continue
-            raw = msg_data[0][1]
-            if not isinstance(raw, (bytes, bytearray)):
-                log.warning("IMAP fetch: id=%s payload не bytes", eid)
+            # BODY.PEEK[] — не выставляет \Seen; иначе при IMAP_ONLY_UNSEEN одна проверка
+            # с (RFC822) снимает письмо с UNSEEN и планировщик больше его не увидит.
+            typ, msg_data = M.fetch(eid, "(BODY.PEEK[])")
+            raw = _raw_message_from_fetch(msg_data) if typ == "OK" else None
+            if raw is None:
+                log.warning(
+                    "IMAP fetch: BODY.PEEK[] не дал тело id=%s typ=%s, пробую RFC822",
+                    eid,
+                    typ,
+                )
+                typ, msg_data = M.fetch(eid, "(RFC822)")
+                raw = _raw_message_from_fetch(msg_data) if typ == "OK" else None
+            if raw is None:
+                log.warning("IMAP fetch: не удалось FETCH id=%s", eid)
                 continue
             msg = email.message_from_bytes(raw)
             mid = _get_message_id(msg)
@@ -155,6 +176,7 @@ def imap_diagnose_connection(
     add(f"Папка: {mailbox!r}")
     add(f"Фильтр отправителя (подстрока From): {sender_filter or '(не задан — все)'}")
     add(f"В настройках бота only_unseen={only_unseen} → поиск: {'UNSEEN' if only_unseen else 'ALL'}")
+    add("Загрузка тела письма в боте: BODY.PEEK (без «прочитано»), чтобы UNSEEN не сбрасывался.")
     try:
         with imaplib.IMAP4_SSL(host, port) as M:
             add("SSL: соединение установлено")

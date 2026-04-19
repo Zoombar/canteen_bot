@@ -171,6 +171,8 @@ def _imap_in_quiet_period(settings: Settings) -> bool:
     Не трогать почту после закрытия заказов до «за час до открытия» следующего цикла
     (время рассылки меню = начало приёма заказов на новый день).
     """
+    if settings.test_mode:
+        return False
     now = local_now(settings.tz)
     deadline_t = parse_hhmm(settings.order_deadline_time)
     broadcast_t = parse_hhmm(settings.menu_broadcast_time)
