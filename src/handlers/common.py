@@ -55,6 +55,7 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
                     KeyboardButton(text="Тест: выходной"),
                 ],
                 [KeyboardButton(text="Тест: сброс")],
+                [KeyboardButton(text="Тест: проверить IMAP")],
             ]
         )
     rows.extend(

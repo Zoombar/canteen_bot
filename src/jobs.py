@@ -194,7 +194,15 @@ def _imap_poll_is_urgent(conn: sqlite3.Connection, settings: Settings) -> bool:
 
 async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
+        log.debug("IMAP poll: пропуск — в .env не заданы host/user/password")
         return
+    log.info(
+        "IMAP poll: загрузка вложений (host=%s port=%s user=%s only_unseen=%s)",
+        settings.imap_host,
+        settings.imap_port,
+        settings.imap_user,
+        settings.imap_only_unseen,
+    )
     try:
         atts = fetch_latest_docx_attachments(
             settings.imap_host,
@@ -205,25 +213,27 @@ async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) ->
             only_unseen=settings.imap_only_unseen,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("IMAP error: %s", e)
+        log.warning("IMAP poll: ошибка при получении писем: %s", e, exc_info=True)
         return
 
     today = local_today(settings.tz)
+    log.info("IMAP poll: получено вложений .docx для разбора: %s (дата меню: %s)", len(atts), today)
     for att in atts:
         if db.is_email_processed(conn, att.message_id):
+            log.info("IMAP poll: письмо уже обработано, пропуск: %s (%s)", att.message_id, att.filename)
             continue
         try:
             items = parse_docx_bytes(att.data)
         except Exception as e:  # noqa: BLE001
-            log.warning("DOCX parse error %s: %s", att.filename, e)
+            log.warning("IMAP poll: ошибка разбора DOCX %s: %s", att.filename, e, exc_info=True)
             continue
         if not items:
-            log.info("No menu rows in %s", att.filename)
+            log.info("IMAP poll: в %s нет строк меню — помечаю письмо обработанным", att.filename)
             db.mark_email_processed(conn, att.message_id)
             continue
         db.create_menu(conn, today, "imap", items)
         db.mark_email_processed(conn, att.message_id)
-        log.info("Menu from IMAP updated: %s items", len(items))
+        log.info("IMAP poll: меню на %s обновлено из %s, позиций: %s", today, att.filename, len(items))
 
 
 async def process_imap_scheduled(
@@ -232,14 +242,32 @@ async def process_imap_scheduled(
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         return
     if _imap_in_quiet_period(settings):
+        log.info(
+            "IMAP job (urgent_only=%s): тихий период после дедлайна до ~часа перед рассылкой меню — опрос не выполняется",
+            urgent_only,
+        )
         return
     if _has_menu_with_items_today(conn, settings):
+        log.info(
+            "IMAP job (urgent_only=%s): меню на сегодня уже есть — опрос не нужен",
+            urgent_only,
+        )
         return
     urgent = _imap_poll_is_urgent(conn, settings)
     if urgent_only and not urgent:
+        log.debug(
+            "IMAP job urgent_only: пропуск (срочный=%s, порог IMAP_URGENT_AFTER=%s)",
+            urgent,
+            settings.imap_urgent_after,
+        )
         return
     if not urgent_only and urgent:
+        log.debug(
+            "IMAP job slow: пропуск (срочный=%s — сейчас опрос делает urgent-интервал)",
+            urgent,
+        )
         return
+    log.info("IMAP job (urgent_only=%s): запуск process_imap_and_menu", urgent_only)
     await process_imap_and_menu(conn, settings)
 
 

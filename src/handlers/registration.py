@@ -113,6 +113,7 @@ async def process_name(message: Message, state: FSMContext, conn: sqlite3.Connec
         "Тест: будний день",
         "Тест: выходной",
         "Тест: сброс",
+        "Тест: проверить IMAP",
     }
     if raw in blocked:
         await message.answer("Сначала введите фамилию и имя для привязки к списку сотрудников.")

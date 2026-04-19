@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import sqlite3
 
@@ -15,6 +16,7 @@ from ..jobs import (
     test_broadcast_menu_now,
     test_broadcast_orders_closed,
 )
+from ..imap_client import imap_diagnose_connection
 from ..menu_parse import parse_docx_bytes
 from ..timeutil import (
     local_today,
@@ -411,6 +413,32 @@ async def btn_test_reset(message: Message, conn: sqlite3.Connection, settings: S
         "Бот приведён к состоянию 'как новый'.",
         reply_markup=admin_main_kb(settings),
     )
+
+
+@router.message(IsAdmin(), IsTestMode(), F.text == "Тест: проверить IMAP")
+async def btn_test_imap(message: Message, settings: Settings) -> None:
+    if not (settings.imap_host and settings.imap_user and settings.imap_password):
+        await message.answer(
+            "IMAP не настроен: в .env нужны IMAP_HOST, IMAP_USER, IMAP_PASSWORD.",
+            reply_markup=admin_main_kb(settings),
+        )
+        return
+    await message.answer("Проверяю IMAP (несколько секунд)…", reply_markup=admin_main_kb(settings))
+    text = await asyncio.to_thread(
+        imap_diagnose_connection,
+        settings.imap_host,
+        settings.imap_port,
+        settings.imap_user,
+        settings.imap_password,
+        sender_filter=settings.imap_sender_filter,
+        only_unseen=settings.imap_only_unseen,
+    )
+    part = 3800
+    for i in range(0, len(text), part):
+        await message.answer(
+            text[i : i + part],
+            reply_markup=admin_main_kb(settings) if i + part >= len(text) else None,
+        )
 
 
 @router.message(IsAdmin(), F.text == "Загрузить меню")
