@@ -512,8 +512,12 @@ async def admin_monthly_manual(message: Message, conn: sqlite3.Connection, setti
     if not settings.admin_ids:
         await message.answer("ADMIN_IDS не задан в .env.", reply_markup=admin_main_kb(settings))
         return
-    await send_monthly_report_previous(message.bot, conn, settings, mark_sent=False)
+    await send_monthly_report_previous(
+        message.bot, conn, settings, mark_sent=False, report_month="current"
+    )
     await message.answer(
-        "Отчёт отправлен администраторам (внеочередной, без блокировки авто-отчёта).",
+        "Отчёт за текущий месяц отправлен администраторам "
+        "(внеочередной, без блокировки авто-отчёта за прошлый месяц). "
+        "Учитываются только подтверждённые заказы.",
         reply_markup=admin_main_kb(settings),
     )

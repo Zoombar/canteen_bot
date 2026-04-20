@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, time, timedelta
+from typing import Literal
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -24,12 +25,14 @@ from .reports import (
     monthly_totals_by_employee,
 )
 from .timeutil import (
+    cron_hm_before_deadline,
     is_weekday,
     is_weekday_effective,
     local_now,
     local_today,
     parse_hhmm,
     previous_month,
+    zone,
 )
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup
 
@@ -290,9 +293,6 @@ async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: S
     log.info("Menu broadcast done for %s", today)
 
 
-REMINDER_NO_ORDER_TEXT = "Выберите еду, или пролетите с заказом)"
-
-
 def _collect_no_order_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
     """
     Сотрудники, которым нужно напомнить о заказе:
@@ -313,6 +313,53 @@ def _collect_no_order_recipients(conn: sqlite3.Connection, settings: Settings) -
         if db.count_distinct_dishes_in_order(conn, order_id) == 0:
             recipients.add(tid)
     return recipients
+
+
+async def remind_no_order_before_deadline(
+    bot: Bot, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """
+    Будни: за ORDER_REMINDER_BEFORE_DEADLINE_MINUTES до ORDER_DEADLINE_TIME — напоминание тем,
+    у кого нет заказа или пустая корзина. Один раз за календарный день; без меню не шлём.
+    """
+    if settings.order_reminder_before_deadline_minutes <= 0:
+        return
+    if not is_weekday(settings.tz):
+        return
+    today = local_today(settings.tz)
+    if db.was_pre_deadline_reminder_sent(conn, today):
+        return
+    if not _has_menu_with_items_today(conn, settings):
+        log.info("Pre-deadline no-order reminder: нет меню на %s — пропуск", today)
+        return
+    deadline_t = parse_hhmm(settings.order_deadline_time)
+    tz = zone(settings.tz)
+    deadline_dt = datetime.combine(today, deadline_t, tzinfo=tz)
+    reminder_dt = deadline_dt - timedelta(minutes=settings.order_reminder_before_deadline_minutes)
+    if reminder_dt.date() != today:
+        log.warning(
+            "Pre-deadline no-order reminder: окно напоминания не в текущие сутки "
+            "(дедлайн %s, за %s мин) — пропуск; сдвиньте ORDER_DEADLINE_TIME или уменьшите ORDER_REMINDER_BEFORE_DEADLINE_MINUTES",
+            settings.order_deadline_time,
+            settings.order_reminder_before_deadline_minutes,
+        )
+        return
+    recipients = _collect_no_order_recipients(conn, settings)
+    if not recipients:
+        log.info("Pre-deadline no-order reminder: все уже заказали на %s", today)
+        db.mark_pre_deadline_reminder_sent(conn, today)
+        return
+    n = settings.order_reminder_before_deadline_minutes
+    text = (
+        f"Через ~{n} минут закончится приём заказов на сегодня (до {settings.order_deadline_time}).\n"
+        "Если ещё не оформили заказ — откройте «Заказ на сегодня»."
+    )
+    kb = employee_main_kb()
+    ok, errs = await _send_bulk(bot, recipients, text, kb)
+    db.mark_pre_deadline_reminder_sent(conn, today)
+    log.info("Pre-deadline no-order reminder: доставлено %s/%s", ok, len(recipients))
+    if errs:
+        log.warning("Pre-deadline no-order reminder: ошибок %s", len(errs))
 
 
 _CANTEEN_TEXT_CHUNK = 3800
@@ -361,39 +408,30 @@ async def auto_send_canteen_summary_weekday(
     log.info("Автосводка столовой отправлена за %s", today)
 
 
-async def remind_no_order_users(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
-    if not is_weekday(settings.tz):
-        return
-    recipients = _collect_no_order_recipients(conn, settings)
-    if not recipients:
-        log.info("No reminder recipients at 10:00")
-        return
-    kb = employee_main_kb()
-    ok, errs = await _send_bulk(bot, recipients, REMINDER_NO_ORDER_TEXT, kb)
-    log.info("No-order reminder sent: %s/%s", ok, len(recipients))
-    if errs:
-        log.warning("No-order reminder errors: %s", len(errs))
-
-
 async def send_monthly_report_previous(
     bot: Bot,
     conn: sqlite3.Connection,
     settings: Settings,
     *,
     mark_sent: bool,
+    report_month: Literal["previous", "current"] = "previous",
 ) -> None:
     if not settings.admin_ids:
         log.warning("ADMIN_IDS пуст — месячный отчёт некуда отправить.")
         return
     today = local_today(settings.tz)
-    y, m = previous_month(today)
+    if report_month == "current":
+        y, m = today.year, today.month
+    else:
+        y, m = previous_month(today)
     ym = f"{y:04d}-{m:02d}"
     if mark_sent and db.was_monthly_report_sent(conn, ym):
         return
     rows = monthly_totals_by_employee(conn, y, m)
     data = build_monthly_xlsx(rows)
     fname = f"meals_{ym}.xlsx"
-    caption = f"Месячный отчёт {ym} (сотрудник / сумма)"
+    suffix = " (текущий месяц)" if report_month == "current" else ""
+    caption = f"Месячный отчёт {ym}{suffix} (сотрудник / сумма)"
     for aid in settings.admin_ids:
         try:
             await bot.send_document(
@@ -443,13 +481,23 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
         replace_existing=True,
     )
 
-    sched.add_job(
-        remind_no_order_users,
-        CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=settings.tz),
-        args=[bot, conn, settings],
-        id="no_order_reminder",
-        replace_existing=True,
-    )
+    if settings.order_reminder_before_deadline_minutes > 0:
+        h_r, m_r = cron_hm_before_deadline(
+            settings.order_deadline_time,
+            settings.order_reminder_before_deadline_minutes,
+        )
+        sched.add_job(
+            remind_no_order_before_deadline,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=h_r,
+                minute=m_r,
+                timezone=settings.tz,
+            ),
+            args=[bot, conn, settings],
+            id="no_order_reminder_pre_deadline",
+            replace_existing=True,
+        )
 
     sched.add_job(
         auto_send_canteen_summary_weekday,

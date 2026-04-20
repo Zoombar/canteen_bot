@@ -90,6 +90,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
             summary_date TEXT PRIMARY KEY,
             sent_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS pre_deadline_reminders_sent (
+            reminder_date TEXT PRIMARY KEY,
+            sent_at TEXT NOT NULL
+        );
         """
     )
     cols = {
@@ -622,6 +627,25 @@ def mark_canteen_summary_sent(conn: sqlite3.Connection, d: date) -> None:
         )
 
 
+def was_pre_deadline_reminder_sent(conn: sqlite3.Connection, d: date) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM pre_deadline_reminders_sent WHERE reminder_date = ?",
+        (d.isoformat(),),
+    ).fetchone()
+    return row is not None
+
+
+def mark_pre_deadline_reminder_sent(conn: sqlite3.Connection, d: date) -> None:
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO pre_deadline_reminders_sent (reminder_date, sent_at)
+            VALUES (?, ?)
+            """,
+            (d.isoformat(), datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+
+
 def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
     """
     Полный сброс рабочих данных бота (как "новая" база без миграций):
@@ -637,3 +661,4 @@ def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM menu_broadcasts")
         conn.execute("DELETE FROM monthly_reports_sent")
         conn.execute("DELETE FROM canteen_summaries_sent")
+        conn.execute("DELETE FROM pre_deadline_reminders_sent")

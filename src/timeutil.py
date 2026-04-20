@@ -23,6 +23,14 @@ def parse_hhmm(s: str) -> time:
     return time(int(parts[0]), int(parts[1]))
 
 
+def cron_hm_before_deadline(deadline_hhmm: str, minutes_before: int) -> tuple[int, int]:
+    """Часы и минуты для cron: локальное время дедлайна минус minutes_before (по модулю суток)."""
+    t = parse_hhmm(deadline_hhmm)
+    dm = t.hour * 60 + t.minute
+    rm = (dm - minutes_before) % (24 * 60)
+    return rm // 60, rm % 60
+
+
 def is_weekday(tz_name: str) -> bool:
     return local_now(tz_name).weekday() < 5
 
