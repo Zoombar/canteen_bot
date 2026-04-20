@@ -37,6 +37,7 @@ class Settings:
     menu_broadcast_time: str  # HH:MM
     order_deadline_time: str  # HH:MM
     order_reminder_before_deadline_minutes: int  # напоминание «не заказали» за столько минут до дедлайна (0 = выкл.)
+    order_draft_cart_reminder_before_deadline_minutes: int  # «в корзине есть блюда, не подтвердили» — за столько минут до дедлайна (0 = выкл.)
     imap_host: str | None
     imap_port: int
     imap_user: str | None
@@ -66,6 +67,10 @@ def load_settings() -> Settings:
         order_reminder_before_deadline_minutes=max(
             0,
             int(os.getenv("ORDER_REMINDER_BEFORE_DEADLINE_MINUTES", "20") or "20"),
+        ),
+        order_draft_cart_reminder_before_deadline_minutes=max(
+            0,
+            int(os.getenv("ORDER_DRAFT_CART_REMINDER_BEFORE_DEADLINE_MINUTES", "10") or "10"),
         ),
         imap_host=(os.getenv("IMAP_HOST") or "").strip() or None,
         imap_port=int(os.getenv("IMAP_PORT", "993") or "993"),

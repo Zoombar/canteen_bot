@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Literal
 
 from aiogram import Bot
@@ -315,6 +315,28 @@ def _collect_no_order_recipients(conn: sqlite3.Connection, settings: Settings) -
     return recipients
 
 
+def _collect_draft_cart_unconfirmed_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
+    """
+    Сотрудники с непустой корзиной на сегодня, но заказ ещё в статусе draft (не подтверждён).
+    """
+    today = local_today(settings.tz)
+    recipients: set[int] = set()
+    for emp in db.list_employees(conn, active_only=True):
+        tid = emp.telegram_user_id
+        if not tid:
+            continue
+        od = db.get_order_for_employee_date(conn, emp.id, today)
+        if od is None:
+            continue
+        order_id, st = od
+        if st != "draft":
+            continue
+        if db.count_distinct_dishes_in_order(conn, order_id) == 0:
+            continue
+        recipients.add(tid)
+    return recipients
+
+
 async def remind_no_order_before_deadline(
     bot: Bot, conn: sqlite3.Connection, settings: Settings
 ) -> None:
@@ -362,37 +384,82 @@ async def remind_no_order_before_deadline(
         log.warning("Pre-deadline no-order reminder: ошибок %s", len(errs))
 
 
-_CANTEEN_TEXT_CHUNK = 3800
-
-
-async def auto_send_canteen_summary_weekday(
+async def remind_draft_cart_before_deadline(
     bot: Bot, conn: sqlite3.Connection, settings: Settings
 ) -> None:
     """
-    После дедлайна заказов (по cron в ORDER_DEADLINE_TIME, пн–пт):
-    отправка сводки в CANTEEN_CHAT_ID (Excel + CSV + текст), один раз за календарный день.
+    Будни: за ORDER_DRAFT_CART_REMINDER_BEFORE_DEADLINE_MINUTES до дедлайна — тем, у кого в корзине
+    есть позиции, но заказ не подтверждён. Один раз за календарный день; без меню не шлём.
     """
+    if settings.order_draft_cart_reminder_before_deadline_minutes <= 0:
+        return
     if not is_weekday(settings.tz):
         return
     today = local_today(settings.tz)
-    if db.was_canteen_summary_sent(conn, today):
+    if db.was_draft_cart_pre_deadline_reminder_sent(conn, today):
         return
+    if not _has_menu_with_items_today(conn, settings):
+        log.info("Pre-deadline draft-cart reminder: нет меню на %s — пропуск", today)
+        return
+    deadline_t = parse_hhmm(settings.order_deadline_time)
+    tz = zone(settings.tz)
+    deadline_dt = datetime.combine(today, deadline_t, tzinfo=tz)
+    n = settings.order_draft_cart_reminder_before_deadline_minutes
+    reminder_dt = deadline_dt - timedelta(minutes=n)
+    if reminder_dt.date() != today:
+        log.warning(
+            "Pre-deadline draft-cart reminder: окно напоминания не в текущие сутки "
+            "(дедлайн %s, за %s мин) — пропуск",
+            settings.order_deadline_time,
+            n,
+        )
+        return
+    recipients = _collect_draft_cart_unconfirmed_recipients(conn, settings)
+    if not recipients:
+        log.info("Pre-deadline draft-cart reminder: нет черновиков с позициями на %s", today)
+        db.mark_draft_cart_pre_deadline_reminder_sent(conn, today)
+        return
+    text = (
+        f"Через ~{n} минут закончится приём заказов на сегодня (до {settings.order_deadline_time}).\n"
+        "У вас в корзине уже выбраны блюда, но заказ не подтверждён. Откройте «Заказ на сегодня» "
+        "и нажмите подтверждение, иначе столовая заказ не получит."
+    )
+    kb = employee_main_kb()
+    ok, errs = await _send_bulk(bot, recipients, text, kb)
+    db.mark_draft_cart_pre_deadline_reminder_sent(conn, today)
+    log.info("Pre-deadline draft-cart reminder: доставлено %s/%s", ok, len(recipients))
+    if errs:
+        log.warning("Pre-deadline draft-cart reminder: ошибок %s", len(errs))
+
+
+_CANTEEN_TEXT_CHUNK = 3800
+
+
+async def send_canteen_summary_to_canteen_chat(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    order_date: date,
+) -> tuple[bool, str | None]:
+    """
+    Отправка сводки (Excel + CSV + текст) в CANTEEN_CHAT_ID.
+    Возвращает (True, None) при успехе, иначе (False, краткое описание ошибки для людей).
+    """
     chat_id = settings.canteen_chat_id
     if not chat_id:
-        log.warning("CANTEEN_CHAT_ID не задан — автосводка для %s не отправлена", today)
-        return
-    items = aggregate_daily_canteen(conn, today)
-    caption = f"Сводка на {today.isoformat()}"
+        return False, "CANTEEN_CHAT_ID не задан в .env"
+    items = aggregate_daily_canteen(conn, order_date)
+    caption = f"Сводка на {order_date.isoformat()}"
     try:
         xlsx_data = build_canteen_excel_bytes(items)
-        xlsx_name = f"canteen_{today.isoformat()}.xlsx"
+        xlsx_name = f"canteen_{order_date.isoformat()}.xlsx"
         await bot.send_document(
             chat_id,
             document=BufferedInputFile(xlsx_data, filename=xlsx_name),
             caption=f"{caption} (Excel)",
         )
         csv_data = build_canteen_csv_bytes(items)
-        csv_name = f"canteen_{today.isoformat()}.csv"
+        csv_name = f"canteen_{order_date.isoformat()}.csv"
         await bot.send_document(
             chat_id,
             document=BufferedInputFile(csv_data, filename=csv_name),
@@ -402,10 +469,53 @@ async def auto_send_canteen_summary_weekday(
         for i in range(0, len(text), _CANTEEN_TEXT_CHUNK):
             await bot.send_message(chat_id, text[i : i + _CANTEEN_TEXT_CHUNK])
     except Exception as e:  # noqa: BLE001
-        log.exception("Автосводка столовой на %s не доставлена: %s", today, e)
+        log.exception("Сводка столовой на %s не доставлена в чат %s: %s", order_date, chat_id, e)
+        err = str(e).strip() or type(e).__name__
+        if len(err) > 400:
+            err = err[:397] + "..."
+        return False, err
+    return True, None
+
+
+async def _notify_admins_canteen_summary_failed(
+    bot: Bot,
+    settings: Settings,
+    order_date: date,
+    reason: str,
+) -> None:
+    if not settings.admin_ids:
         return
-    db.mark_canteen_summary_sent(conn, today)
-    log.info("Автосводка столовой отправлена за %s", today)
+    text = (
+        f"Сводка заказов за {order_date.isoformat()} не доставлена работнику столовой.\n"
+        f"Причина: {reason}\n\n"
+        "Отправьте сводку вручную: кнопка «Сводка в столовую (вручную)»."
+    )
+    for aid in settings.admin_ids:
+        try:
+            await bot.send_message(aid, text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не удалось уведомить админа %s о сбое сводки столовой: %s", aid, e)
+
+
+async def auto_send_canteen_summary_weekday(
+    bot: Bot, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """
+    После дедлайна заказов (по cron в ORDER_DEADLINE_TIME, пн–пт):
+    отправка сводки в CANTEEN_CHAT_ID (Excel + CSV + текст), один раз за календарный день.
+    При ошибке — уведомление всем админам; при успехе — только лог.
+    """
+    if not is_weekday(settings.tz):
+        return
+    today = local_today(settings.tz)
+    if db.was_canteen_summary_sent(conn, today):
+        return
+    ok, err = await send_canteen_summary_to_canteen_chat(bot, conn, settings, today)
+    if ok:
+        db.mark_canteen_summary_sent(conn, today)
+        log.info("Автосводка столовой отправлена за %s", today)
+        return
+    await _notify_admins_canteen_summary_failed(bot, settings, today, err or "неизвестная ошибка")
 
 
 async def send_monthly_report_previous(
@@ -496,6 +606,24 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
             ),
             args=[bot, conn, settings],
             id="no_order_reminder_pre_deadline",
+            replace_existing=True,
+        )
+
+    if settings.order_draft_cart_reminder_before_deadline_minutes > 0:
+        h_c, m_c = cron_hm_before_deadline(
+            settings.order_deadline_time,
+            settings.order_draft_cart_reminder_before_deadline_minutes,
+        )
+        sched.add_job(
+            remind_draft_cart_before_deadline,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=h_c,
+                minute=m_c,
+                timezone=settings.tz,
+            ),
+            args=[bot, conn, settings],
+            id="draft_cart_reminder_pre_deadline",
             replace_existing=True,
         )
 

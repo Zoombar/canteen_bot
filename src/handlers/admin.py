@@ -13,6 +13,7 @@ from .. import db
 from ..config import Settings
 from ..jobs import (
     process_imap_and_menu,
+    send_canteen_summary_to_canteen_chat,
     send_monthly_report_previous,
     test_broadcast_menu_now,
     test_broadcast_orders_closed,
@@ -183,7 +184,8 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
         "Админ-панель.\n\n"
         "Управление сотрудниками — «Список сотрудников» (карточка записи). Меню и отчёты — кнопками ниже.\n"
         f"Сводка для столовой уходит в чат (CANTEEN_CHAT_ID в .env) автоматически в {settings.order_deadline_time} "
-        "в будни, в момент дедлайна заказов."
+        "в будни, в момент дедлайна заказов. Если автоматическая отправка не удалась — всем админам придёт сообщение; "
+        "повторить вручную можно кнопкой «Сводка в столовую (вручную)»."
         f"{test_block}\n"
         f"{bind_hint}"
     )
@@ -505,6 +507,24 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
         f"Меню на {today.isoformat()} загружено, позиций: {len(items)}.",
         reply_markup=admin_main_kb(settings),
     )
+
+
+@router.message(IsAdmin(), F.text == "Сводка в столовую (вручную)")
+async def admin_canteen_summary_manual(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    today = local_today(settings.tz)
+    ok, err = await send_canteen_summary_to_canteen_chat(message.bot, conn, settings, today)
+    if ok:
+        if not db.was_canteen_summary_sent(conn, today):
+            db.mark_canteen_summary_sent(conn, today)
+        await message.answer(
+            "Сводка (Excel, CSV, текст) отправлена в чат столовой.",
+            reply_markup=admin_main_kb(settings),
+        )
+    else:
+        await message.answer(
+            f"Не удалось отправить в чат столовой: {err}",
+            reply_markup=admin_main_kb(settings),
+        )
 
 
 @router.message(IsAdmin(), F.text == "Месячный отчёт")
