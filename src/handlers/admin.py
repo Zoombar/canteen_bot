@@ -13,7 +13,7 @@ from .. import db
 from ..config import Settings
 from ..jobs import (
     process_imap_and_menu,
-    send_canteen_summary_to_canteen_chat,
+    send_canteen_summary_to_chat,
     send_monthly_report_previous,
     test_broadcast_menu_now,
     test_broadcast_orders_closed,
@@ -184,8 +184,9 @@ def _admin_panel_text(conn: sqlite3.Connection, uid: int, settings: Settings) ->
         "Админ-панель.\n\n"
         "Управление сотрудниками — «Список сотрудников» (карточка записи). Меню и отчёты — кнопками ниже.\n"
         f"Сводка для столовой уходит в чат (CANTEEN_CHAT_ID в .env) автоматически в {settings.order_deadline_time} "
-        "в будни, в момент дедлайна заказов. Если автоматическая отправка не удалась — всем админам придёт сообщение; "
-        "повторить вручную можно кнопкой «Сводка в столовую (вручную)»."
+        "в будни, в момент дедлайна заказов. Если автоматическая отправка не удалась — всем админам придёт сообщение. "
+        "Кнопка «Сводка в столовую» присылает текущую сводку вам в этот чат (чтобы переслать работнику столовой); "
+        "в чат столовой по этой кнопке ничего не отправляется."
         f"{test_block}\n"
         f"{bind_hint}"
     )
@@ -509,20 +510,31 @@ async def admin_upload_docx(message: Message, conn: sqlite3.Connection, settings
     )
 
 
-@router.message(IsAdmin(), F.text == "Сводка в столовую (вручную)")
-async def admin_canteen_summary_manual(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+@router.message(IsAdmin(), F.text == "Сводка в столовую")
+async def admin_canteen_summary_to_self(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
+    uid = message.from_user.id if message.from_user else None
+    if uid is None:
+        await message.answer("Не удалось определить пользователя.", reply_markup=admin_main_kb(settings))
+        return
     today = local_today(settings.tz)
-    ok, err = await send_canteen_summary_to_canteen_chat(message.bot, conn, settings, today)
+    intro = (
+        f"Сводка заказов на {today.isoformat()} (для пересылки работнику столовой). "
+        "Ниже — Excel, CSV и текст."
+    )
+    try:
+        await message.answer(intro)
+    except Exception:  # noqa: BLE001
+        pass
+    ok, err = await send_canteen_summary_to_chat(message.bot, conn, today, uid)
     if ok:
-        if not db.was_canteen_summary_sent(conn, today):
-            db.mark_canteen_summary_sent(conn, today)
         await message.answer(
-            "Сводка (Excel, CSV, текст) отправлена в чат столовой.",
+            "Готово. Эти сообщения и файлы в чат столовой не отправлялись — только вам. "
+            "При необходимости перешлите их из этого чата работнику столовой.",
             reply_markup=admin_main_kb(settings),
         )
     else:
         await message.answer(
-            f"Не удалось отправить в чат столовой: {err}",
+            f"Не удалось сформировать или отправить сводку: {err}",
             reply_markup=admin_main_kb(settings),
         )
 

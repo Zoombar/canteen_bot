@@ -435,19 +435,16 @@ async def remind_draft_cart_before_deadline(
 _CANTEEN_TEXT_CHUNK = 3800
 
 
-async def send_canteen_summary_to_canteen_chat(
+async def send_canteen_summary_to_chat(
     bot: Bot,
     conn: sqlite3.Connection,
-    settings: Settings,
     order_date: date,
+    chat_id: int,
 ) -> tuple[bool, str | None]:
     """
-    Отправка сводки (Excel + CSV + текст) в CANTEEN_CHAT_ID.
+    Отправка сводки (Excel + CSV + текст) в указанный Telegram-чат.
     Возвращает (True, None) при успехе, иначе (False, краткое описание ошибки для людей).
     """
-    chat_id = settings.canteen_chat_id
-    if not chat_id:
-        return False, "CANTEEN_CHAT_ID не задан в .env"
     items = aggregate_daily_canteen(conn, order_date)
     caption = f"Сводка на {order_date.isoformat()}"
     try:
@@ -469,12 +466,27 @@ async def send_canteen_summary_to_canteen_chat(
         for i in range(0, len(text), _CANTEEN_TEXT_CHUNK):
             await bot.send_message(chat_id, text[i : i + _CANTEEN_TEXT_CHUNK])
     except Exception as e:  # noqa: BLE001
-        log.exception("Сводка столовой на %s не доставлена в чат %s: %s", order_date, chat_id, e)
+        log.exception("Сводка на %s не доставлена в чат %s: %s", order_date, chat_id, e)
         err = str(e).strip() or type(e).__name__
         if len(err) > 400:
             err = err[:397] + "..."
         return False, err
     return True, None
+
+
+async def send_canteen_summary_to_canteen_chat(
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    order_date: date,
+) -> tuple[bool, str | None]:
+    """
+    Отправка сводки в чат работника столовой (CANTEEN_CHAT_ID).
+    """
+    chat_id = settings.canteen_chat_id
+    if not chat_id:
+        return False, "CANTEEN_CHAT_ID не задан в .env"
+    return await send_canteen_summary_to_chat(bot, conn, order_date, chat_id)
 
 
 async def _notify_admins_canteen_summary_failed(
@@ -488,7 +500,7 @@ async def _notify_admins_canteen_summary_failed(
     text = (
         f"Сводка заказов за {order_date.isoformat()} не доставлена работнику столовой.\n"
         f"Причина: {reason}\n\n"
-        "Отправьте сводку вручную: кнопка «Сводка в столовую (вручную)»."
+        "Нажмите «Сводка в столовую» в админке — файлы придут вам в чат с ботом; перешлите их работнику столовой."
     )
     for aid in settings.admin_ids:
         try:

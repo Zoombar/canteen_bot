@@ -38,7 +38,7 @@ def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="Список сотрудников")],
         [KeyboardButton(text="Загрузить меню")],
         [KeyboardButton(text="Месячный отчёт")],
-        [KeyboardButton(text="Сводка в столовую (вручную)")],
+        [KeyboardButton(text="Сводка в столовую")],
     ]
     if settings.test_mode:
         rows.extend(
