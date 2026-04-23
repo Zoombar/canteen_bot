@@ -16,12 +16,13 @@ from .. import db
 from ..config import Settings
 from ..menu_export import build_menu_txt_bytes
 from ..menu_parse import sanitize_dish_name
+from ..reports import CONTAINER_PRICE_RUB, OrderLine, count_containers_for_order
 from ..timeutil import is_deadline_passed, is_weekday_effective, local_today
 from .common import OrderUiNotBlocked, employee_main_kb
 
 router = Router(name="employee_order")
 
-MAX_DISH_TYPES = 4
+MAX_DISH_TYPES = 6
 MAX_CAPTION = 1000
 # Telegram: текст на кнопке не длиннее 64 символов
 TG_BTN_MAX = 64
@@ -72,12 +73,26 @@ def _cart_text(conn: sqlite3.Connection, order_id: int) -> str:
         return "Корзина пуста."
     lines = ["Ваш заказ:"]
     total = 0.0
+    order_lines: list[OrderLine] = []
     for mi, q in rows:
         line_sum = mi.price * q
         total += line_sum
         title = sanitize_dish_name(mi.dish_name)
         lines.append(f"• {title} × {q} = {line_sum:.2f} руб.")
-    lines.append(f"\nИтого: {total:.2f} руб.")
+        order_lines.append(
+            OrderLine(
+                menu_item_id=mi.id,
+                dish_name=mi.dish_name,
+                dish_kind=mi.dish_kind,
+                quantity=q,
+            )
+        )
+    containers = count_containers_for_order(order_lines)
+    containers_sum = containers * CONTAINER_PRICE_RUB
+    if containers > 0:
+        lines.append(f"• Контейнеры × {containers} = {containers_sum:.2f} руб.")
+    total_with_containers = total + containers_sum
+    lines.append(f"\nИтого: {total_with_containers:.2f} руб.")
     return "\n".join(lines)
 
 
@@ -266,7 +281,7 @@ async def text_help(message: Message, settings: Settings) -> None:
         "Бот заказа питания.\n"
         + line_menu
         + line_deadline
-        + "• Не более 4 разных блюд в одном заказе.\n"
+        + "• Не более 6 разных блюд в одном заказе.\n"
         "• Перед подтверждением откройте «Корзину» и проверьте список.\n"
         "• Команда /start — привязка ФИО.",
     )
@@ -364,7 +379,7 @@ async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
     oid = db.get_or_create_draft_order(conn, eid, today)
     cart = _load_cart_dict(conn, oid)
     if item_id not in cart and len(cart) >= MAX_DISH_TYPES:
-        await cb.answer("Не более 4 разных блюд.", show_alert=True)
+        await cb.answer("Не более 6 разных блюд.", show_alert=True)
         return
     cart[item_id] = cart.get(item_id, 0) + 1
     _save_cart(conn, oid, cart)
