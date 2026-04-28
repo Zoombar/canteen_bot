@@ -24,6 +24,7 @@ router = Router(name="employee_order")
 
 MAX_DISH_TYPES = 6
 MAX_CAPTION = 1000
+MENU_PAGE_SIZE = 10
 # Telegram: текст на кнопке не длиннее 64 символов
 TG_BTN_MAX = 64
 
@@ -105,39 +106,54 @@ def _truncate_caption(text: str) -> str:
 def _menu_kb(
     items: list[db.MenuItemRow],
     cart: dict[int, int],
+    page: int = 0,
 ) -> InlineKeyboardMarkup:
+    total = len(items)
+    pages = max(1, (total + MENU_PAGE_SIZE - 1) // MENU_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * MENU_PAGE_SIZE
+    end = min(total, start + MENU_PAGE_SIZE)
+
     rows: list[list[InlineKeyboardButton]] = []
-    for idx, it in enumerate(items):
+    for idx in range(start, end):
+        it = items[idx]
         qty = cart.get(it.id, 0)
         ordinal = idx + 1
         rows.append(
             [
                 InlineKeyboardButton(
                     text=_dish_title_button(it, ordinal),
-                    callback_data=f"n:{it.id}",
+                    callback_data=f"n:{it.id}:{page}",
                 ),
             ]
         )
         rows.append(
             [
-                InlineKeyboardButton(text="−", callback_data=f"sub:{it.id}"),
+                InlineKeyboardButton(text="−", callback_data=f"sub:{it.id}:{page}"),
                 InlineKeyboardButton(
                     text=_qty_stepper_middle(qty),
-                    callback_data=f"q:{it.id}",
+                    callback_data=f"q:{it.id}:{page}",
                 ),
-                InlineKeyboardButton(text="+", callback_data=f"+:{it.id}"),
+                InlineKeyboardButton(text="+", callback_data=f"+:{it.id}:{page}"),
             ]
         )
-    rows.append([InlineKeyboardButton(text="Корзина", callback_data="cart")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"m:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data=f"m:{page}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"m:{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="Корзина", callback_data=f"cart:{page}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _cart_kb() -> InlineKeyboardMarkup:
+def _cart_kb(page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Подтвердить заказ", callback_data="cf"),
-                InlineKeyboardButton(text="К меню", callback_data="m:0"),
+                InlineKeyboardButton(text="К меню", callback_data=f"m:{page}"),
             ]
         ]
     )
@@ -166,16 +182,15 @@ async def _open_menu(
         await message.answer("Меню пустое.")
         return
 
-    od = db.get_order_for_employee_date(conn, eid, today)
-    if od and od[1] == "confirmed":
-        oid = od[0]
-        await message.answer(
-            "Ваш заказ уже подтверждён и не может быть изменён.\n\n" + _cart_text(conn, oid),
-            reply_markup=employee_main_kb(),
-        )
-        return
-
     if _deadline_blocks(settings):
+        od = db.get_order_for_employee_date(conn, eid, today)
+        if od and od[1] == "confirmed":
+            oid = od[0]
+            await message.answer(
+                "Дедлайн прошёл. Заказ уже зафиксирован.\n\n" + _cart_text(conn, oid),
+                reply_markup=employee_main_kb(),
+            )
+            return
         await message.answer(
             "Время приёма заказов на сегодня истекло.",
             reply_markup=employee_main_kb(),
@@ -190,7 +205,7 @@ async def _open_menu(
     await message.answer_document(
         document=BufferedInputFile(data, filename=fname),
         caption=caption,
-        reply_markup=_menu_kb(items, cart),
+        reply_markup=_menu_kb(items, cart, page=0),
     )
 
 
@@ -208,6 +223,7 @@ async def _refresh_menu_message(
     cb: CallbackQuery,
     conn: sqlite3.Connection,
     settings: Settings,
+    page: int | None = None,
 ) -> None:
     uid = cb.from_user.id if cb.from_user else 0
     eid = _emp_id(conn, uid)
@@ -220,14 +236,27 @@ async def _refresh_menu_message(
     items = db.list_menu_items(conn, mid)
     oid = db.get_or_create_draft_order(conn, eid, today)
     cart = _load_cart_dict(conn, oid)
+    if page is None:
+        page = _extract_page(cb.data)
     caption = _menu_caption(today)
     try:
         if cb.message and cb.message.document:
-            await cb.message.edit_caption(caption=caption, reply_markup=_menu_kb(items, cart))
+            await cb.message.edit_caption(caption=caption, reply_markup=_menu_kb(items, cart, page=page))
         elif cb.message:
-            await cb.message.edit_reply_markup(reply_markup=_menu_kb(items, cart))
+            await cb.message.edit_reply_markup(reply_markup=_menu_kb(items, cart, page=page))
     except Exception:
         pass
+
+
+def _extract_page(data: str | None) -> int:
+    if not data:
+        return 0
+    parts = data.split(":")
+    if len(parts) >= 3 and parts[-1].isdigit():
+        return max(0, int(parts[-1]))
+    if len(parts) >= 2 and parts[0] in {"m", "cart"} and parts[1].isdigit():
+        return max(0, int(parts[1]))
+    return 0
 
 
 @router.message(OrderUiNotBlocked(), F.text == "Заказ на сегодня")
@@ -253,15 +282,19 @@ async def text_cart(message: Message, conn: sqlite3.Connection, settings: Settin
     else:
         oid = od[0]
     st = od[1] if od else "draft"
-    if st == "confirmed":
-        await message.answer("Заказ уже подтверждён.\n\n" + _cart_text(conn, oid))
-        return
     if _deadline_blocks(settings):
+        if st == "confirmed":
+            await message.answer("Заказ подтверждён и дедлайн прошёл.\n\n" + _cart_text(conn, oid))
+            return
         await message.answer("Время приёма заказов на сегодня истекло.")
         return
 
     text = _truncate_caption(_cart_text(conn, oid))
     kb = _cart_kb()
+    if st == "confirmed":
+        text = _truncate_caption(
+            "Заказ уже подтверждён, но до дедлайна можно изменить позиции.\n\n" + _cart_text(conn, oid)
+        )
     await message.answer(text, reply_markup=kb)
 
 
@@ -301,22 +334,20 @@ async def cb_menu_page(cb: CallbackQuery, conn: sqlite3.Connection, settings: Se
         return
     items = db.list_menu_items(conn, mid)
     od = db.get_order_for_employee_date(conn, eid, today)
-    if od and od[1] == "confirmed":
-        await cb.answer("Уже подтверждено.", show_alert=True)
-        return
     if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
+    page = _extract_page(cb.data)
     oid = db.get_or_create_draft_order(conn, eid, today)
     cart = _load_cart_dict(conn, oid)
     caption = _menu_caption(today)
     try:
         if cb.message and cb.message.document:
-            await cb.message.edit_caption(caption=caption, reply_markup=_menu_kb(items, cart))
+            await cb.message.edit_caption(caption=caption, reply_markup=_menu_kb(items, cart, page=page))
         elif cb.message:
             await cb.message.edit_text(
                 text=caption,
-                reply_markup=_menu_kb(items, cart),
+                reply_markup=_menu_kb(items, cart, page=page),
             )
     except Exception:
         pass
@@ -363,6 +394,7 @@ async def cb_qty_info(cb: CallbackQuery, conn: sqlite3.Connection, settings: Set
 async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
     parts = cb.data.split(":")
     item_id = int(parts[1])
+    page = _extract_page(cb.data)
     uid = cb.from_user.id if cb.from_user else 0
     eid = _emp_id(conn, uid)
     if not eid:
@@ -372,10 +404,6 @@ async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
     if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
-    od = db.get_order_for_employee_date(conn, eid, today)
-    if od and od[1] == "confirmed":
-        await cb.answer("Уже подтверждено.", show_alert=True)
-        return
     oid = db.get_or_create_draft_order(conn, eid, today)
     cart = _load_cart_dict(conn, oid)
     if item_id not in cart and len(cart) >= MAX_DISH_TYPES:
@@ -383,7 +411,7 @@ async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
         return
     cart[item_id] = cart.get(item_id, 0) + 1
     _save_cart(conn, oid, cart)
-    await _refresh_menu_message(cb, conn, settings)
+    await _refresh_menu_message(cb, conn, settings, page=page)
     await cb.answer("Добавлено")
 
 
@@ -391,6 +419,7 @@ async def cb_add(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
 async def cb_sub(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
     parts = cb.data.split(":")
     item_id = int(parts[1])
+    page = _extract_page(cb.data)
     uid = cb.from_user.id if cb.from_user else 0
     eid = _emp_id(conn, uid)
     if not eid:
@@ -404,10 +433,7 @@ async def cb_sub(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
     if not od:
         await cb.answer()
         return
-    oid, st = od
-    if st == "confirmed":
-        await cb.answer("Уже подтверждено.", show_alert=True)
-        return
+    oid, _st = od
     cart = _load_cart_dict(conn, oid)
     if item_id not in cart:
         await cb.answer()
@@ -416,11 +442,11 @@ async def cb_sub(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings
     if cart[item_id] <= 0:
         del cart[item_id]
     _save_cart(conn, oid, cart)
-    await _refresh_menu_message(cb, conn, settings)
+    await _refresh_menu_message(cb, conn, settings, page=page)
     await cb.answer("Убрано")
 
 
-@router.callback_query(OrderUiNotBlocked(), F.data == "cart")
+@router.callback_query(OrderUiNotBlocked(), F.data.startswith("cart"))
 async def cb_cart(cb: CallbackQuery, conn: sqlite3.Connection, settings: Settings) -> None:
     uid = cb.from_user.id if cb.from_user else 0
     eid = _emp_id(conn, uid)
@@ -430,15 +456,12 @@ async def cb_cart(cb: CallbackQuery, conn: sqlite3.Connection, settings: Setting
     today = local_today(settings.tz)
     od = db.get_order_for_employee_date(conn, eid, today)
     oid = db.get_or_create_draft_order(conn, eid, today) if not od else od[0]
-    st = od[1] if od else "draft"
-    if st == "confirmed":
-        await cb.answer("Уже подтверждено.", show_alert=True)
-        return
     if _deadline_blocks(settings):
         await cb.answer("Дедлайн прошёл.", show_alert=True)
         return
+    page = _extract_page(cb.data)
     text = _truncate_caption(_cart_text(conn, oid))
-    kb = _cart_kb()
+    kb = _cart_kb(page=page)
     try:
         if cb.message and cb.message.document:
             await cb.message.edit_caption(caption=text, reply_markup=kb)
@@ -465,9 +488,6 @@ async def cb_confirm(cb: CallbackQuery, conn: sqlite3.Connection, settings: Sett
         await cb.answer("Корзина пуста.", show_alert=True)
         return
     oid, st = od
-    if st == "confirmed":
-        await cb.answer("Уже подтверждено.", show_alert=True)
-        return
     rows = db.list_order_items_with_menu(conn, oid)
     if not rows:
         await cb.answer("Корзина пуста.", show_alert=True)
@@ -475,8 +495,11 @@ async def cb_confirm(cb: CallbackQuery, conn: sqlite3.Connection, settings: Sett
     if len(rows) > MAX_DISH_TYPES:
         await cb.answer("Слишком много разных блюд.", show_alert=True)
         return
-    db.confirm_order(conn, oid)
-    done = _truncate_caption("Заказ подтверждён. Спасибо!\n\n" + _cart_text(conn, oid))
+    if st != "confirmed":
+        db.confirm_order(conn, oid)
+        done = _truncate_caption("Заказ подтверждён. Спасибо!\n\n" + _cart_text(conn, oid))
+    else:
+        done = _truncate_caption("Заказ уже подтверждён. Изменения сохранены.\n\n" + _cart_text(conn, oid))
     try:
         if cb.message and cb.message.document:
             await cb.message.edit_caption(caption=done, reply_markup=None)
