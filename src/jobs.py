@@ -514,6 +514,8 @@ async def send_canteen_summary_to_canteen_chat(
     """
     Отправка сводки в чат работника столовой (CANTEEN_CHAT_ID).
     """
+    if settings.test_mode:
+        return False, "TEST_MODE: отправка в чат столовой отключена"
     chat_id = settings.canteen_chat_id
     if not chat_id:
         return False, "CANTEEN_CHAT_ID не задан в .env"
@@ -548,6 +550,9 @@ async def auto_send_canteen_summary_weekday(
     отправка сводки в CANTEEN_CHAT_ID (Excel + CSV + текст), один раз за календарный день.
     При ошибке — уведомление всем админам; при успехе — только лог.
     """
+    if settings.test_mode:
+        log.info("Автосводка столовой: TEST_MODE включён — отправка в чат столовой отключена")
+        return
     if not is_weekday(settings.tz):
         return
     today = local_today(settings.tz)

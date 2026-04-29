@@ -140,6 +140,27 @@ async def test_new_menu_notification_respects_admin_toggle(
     assert bot.sent_messages == []
 
 
+@pytest.mark.asyncio
+async def test_canteen_chat_send_is_disabled_in_test_mode(
+    conn: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    async def _fake_send(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal called
+        called = True
+        return True, None
+
+    monkeypatch.setattr(jobs, "send_canteen_summary_to_chat", _fake_send)
+    ok, err = await jobs.send_canteen_summary_to_canteen_chat(
+        _FakeBot(), conn, settings, local_today(settings.tz)
+    )
+
+    assert ok is False
+    assert "TEST_MODE" in (err or "")
+    assert called is False
+
+
 def test_menu_pagination_first_page_has_next_only() -> None:
     items = [
         db.MenuItemRow(id=i + 1, menu_id=1, sort_order=i, dish_name=f"Dish {i+1}", price=10.0 + i, dish_kind="other")
