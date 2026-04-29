@@ -210,7 +210,40 @@ def test_comma_list_with_single_trailing_price_condiments() -> None:
     assert ("сметана", 10.0) in cleaned
     assert ("майонез", 10.0) in cleaned
     assert ("сгущенное молоко", 10.0) in cleaned
-    assert ("гренки 20", 10.0) in cleaned
+    assert ("гренки", 10.0) in cleaned
+
+
+def test_comma_list_mixed_item_and_shared_price() -> None:
+    line = "Хот-дог 80, Сочень — 50.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Хот-дог", 80.0) in cleaned
+    assert ("Сочень", 50.0) in cleaned
+
+
+def test_comma_list_two_items_bare_prices() -> None:
+    line = "Хот-дог 80, Сочень 50"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Хот-дог", 80.0) in cleaned
+    assert ("Сочень", 50.0) in cleaned
+
+
+def test_comma_list_mixed_explicit_and_bare_prices() -> None:
+    line = (
+        "Пицца 100р, Чебурек 70р, Сосиска в тесте 60, "
+        "Плюшка с маком 20, Сочник творожный 90,"
+    )
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Пицца", 100.0) in cleaned
+    assert ("Чебурек", 70.0) in cleaned
+    assert ("Сосиска в тесте", 60.0) in cleaned
+    assert ("Плюшка с маком", 20.0) in cleaned
+    assert ("Сочник творожный", 90.0) in cleaned
 
 
 def test_comma_list_with_hyphen_price_and_volume() -> None:

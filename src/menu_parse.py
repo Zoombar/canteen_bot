@@ -241,6 +241,20 @@ _EXPLICIT_RUB_TOKEN_RE = re.compile(
 )
 
 
+def _split_name_and_trailing_number_token(name: str) -> tuple[str, int | None]:
+    m = re.search(r"^(.*\D)\s+(\d{1,3})\s*$", name)
+    if not m:
+        return name.strip(), None
+    base = m.group(1).strip()
+    if not base:
+        return name.strip(), None
+    return base, int(m.group(2))
+
+
+def _has_explicit_price_marker(text: str) -> bool:
+    return bool(_EXPLICIT_RUB_TOKEN_RE.search(text) or re.search(r"\d+-\d{1,2}", text))
+
+
 def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
     if not line or not _EXPLICIT_RUB_TOKEN_RE.search(line):
         return None
@@ -270,6 +284,58 @@ def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
             out.append((name, price))
 
     return out if len(out) >= 2 else None
+
+
+def split_multi_comma_mixed_price_line(line: str) -> list[tuple[str, float]] | None:
+    """
+    Список через запятую, где у части позиций цена указана явно, а у части — "голым" числом:
+      "Пицца 100р, Чебурек 70р, Сосиска в тесте 60, ...";
+      "Хот-дог 80, Сочень 50".
+    """
+    if not line or "," not in line:
+        return None
+
+    s = line.strip().strip(" \t\r\n")
+    s_masked, dc_toks = _protect_volume_decimal_commas(s)
+    raw_parts = _split_top_level_by_commas(s_masked)
+    if len(raw_parts) < 2:
+        return None
+
+    out: list[tuple[str, float]] = []
+    explicit_count = 0
+    trailing_count = 0
+    for part in raw_parts:
+        p = _restore_volume_decimal_commas(part.strip(), dc_toks)
+        p = p.strip().strip(".,;:")
+        p = re.sub(r"^\s*\d+\s*[.)]\s*", "", p)
+        if not p:
+            continue
+
+        parsed = _parse_line(p)
+        if parsed is not None:
+            name, price = parsed
+            out.append((name, price))
+            if _has_explicit_price_marker(p):
+                explicit_count += 1
+            else:
+                trailing_count += 1
+            continue
+
+        base_name, trailing_num = _split_name_and_trailing_number_token(p)
+        if trailing_num is not None and 5 <= trailing_num <= 1000:
+            out.append((base_name, float(trailing_num)))
+            trailing_count += 1
+
+    # Защита от ложных срабатываний:
+    # - либо есть хотя бы одна явная цена + минимум ещё одна цена,
+    # - либо две и более позиций с "голыми" ценами.
+    if len(out) < 2:
+        return None
+    if explicit_count >= 1 and len(out) >= 2:
+        return out
+    if explicit_count == 0 and trailing_count >= 2:
+        return out
+    return None
 
 
 def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | None:
@@ -312,13 +378,45 @@ def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | N
 
     if len(cleaned_parts) < 2:
         return None
-    return [(p, price) for p in cleaned_parts]
+
+    out: list[tuple[str, float]] = []
+    part_count = len(cleaned_parts)
+    for i, p in enumerate(cleaned_parts):
+        parsed = _parse_line(p)
+        if parsed is None:
+            out.append((p, price))
+            continue
+        own_name, own_price = parsed
+
+        # Если цена в части явно размечена (рубли / "50-00"), считаем её собственной.
+        if _has_explicit_price_marker(p):
+            out.append((own_name, own_price))
+            continue
+
+        # Голое число в конце части (например "гренки 20") часто означает граммовку.
+        base_name, trailing_num = _split_name_and_trailing_number_token(p)
+        if trailing_num is not None:
+            # Для коротких списков чаще всего это именно отдельная цена позиции:
+            # "Хот-дог 80, Сочень — 50.00 ₽".
+            if part_count <= 3:
+                out.append((own_name, own_price))
+                continue
+            # Для длинных списков при общей цене в конце считаем это весом/граммовкой.
+            out.append((base_name, price))
+            continue
+
+        out.append((p, price))
+    return out if len(out) >= 2 else None
 
 
 def _parse_one_line_to_items(line: str) -> tuple[list[tuple[str, float]], bool]:
     multi = split_multi_price_line(line)
     if multi is not None and len(multi) >= 2:
         return multi, True
+
+    multi_comma_mixed = split_multi_comma_mixed_price_line(line)
+    if multi_comma_mixed is not None and len(multi_comma_mixed) >= 2:
+        return multi_comma_mixed, True
 
     multi_comma = split_multi_comma_price_line(line)
     if multi_comma is not None and len(multi_comma) >= 2:
