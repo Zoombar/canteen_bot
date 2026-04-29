@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db
 from ..config import Settings
 from ..jobs import (
+    MENU_NOTIFY_SETTING_KEY,
     process_imap_and_menu,
     send_canteen_summary_to_chat,
     send_monthly_report_previous,
@@ -33,6 +34,35 @@ router = Router(name="admin")
 EMP_LIST_PAGE_SIZE = 8
 # Текст на inline-кнопке — лимит Telegram.
 _EMP_BTN_MAX = 58
+
+
+def _menu_notify_enabled(conn: sqlite3.Connection) -> bool:
+    return db.get_app_setting_bool(conn, MENU_NOTIFY_SETTING_KEY, True)
+
+
+def _menu_notify_settings_kb(conn: sqlite3.Connection) -> InlineKeyboardMarkup:
+    enabled = _menu_notify_enabled(conn)
+    text = "✅ Включены" if enabled else "❌ Выключены"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Массовые: {text}",
+                    callback_data="adm:notify_menu:toggle",
+                )
+            ]
+        ]
+    )
+
+
+def _menu_notify_settings_text(conn: sqlite3.Connection) -> str:
+    enabled = _menu_notify_enabled(conn)
+    status = "включены" if enabled else "выключены"
+    return (
+        "Настройки уведомлений.\n\n"
+        f"Массовые уведомления о новом меню сейчас: {status}.\n"
+        "Если выключить, бот не будет писать всем, когда появится новое меню."
+    )
 
 
 def _emp_list_button_label(r: db.EmployeeRow) -> str:
@@ -206,6 +236,28 @@ async def admin_panel(message: Message, conn: sqlite3.Connection, settings: Sett
 async def admin_list_employees(message: Message, conn: sqlite3.Connection, settings: Settings) -> None:
     text, kb = _employee_list_text_and_kb(conn, page=0)
     await message.answer(text, reply_markup=kb)
+
+
+@router.message(IsAdmin(), F.text == "Настройки уведомлений")
+async def admin_notify_settings(message: Message, conn: sqlite3.Connection) -> None:
+    await message.answer(
+        _menu_notify_settings_text(conn),
+        reply_markup=_menu_notify_settings_kb(conn),
+    )
+
+
+@router.callback_query(IsAdminCb(), F.data == "adm:notify_menu:toggle")
+async def admin_notify_toggle(cb: CallbackQuery, conn: sqlite3.Connection) -> None:
+    enabled = _menu_notify_enabled(conn)
+    db.set_app_setting_bool(conn, MENU_NOTIFY_SETTING_KEY, not enabled)
+    if not cb.message:
+        await cb.answer("Сохранено")
+        return
+    await cb.message.edit_text(
+        _menu_notify_settings_text(conn),
+        reply_markup=_menu_notify_settings_kb(conn),
+    )
+    await cb.answer("Сохранено")
 
 
 @router.callback_query(IsAdminCb(), F.data.startswith("emp:"))

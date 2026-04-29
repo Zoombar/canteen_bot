@@ -37,6 +37,7 @@ from .timeutil import (
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup
 
 log = logging.getLogger(__name__)
+MENU_NOTIFY_SETTING_KEY = "notify_new_menu_mass"
 
 
 def collect_menu_broadcast_recipients(conn: sqlite3.Connection, settings: Settings) -> set[int]:
@@ -197,10 +198,10 @@ def _imap_poll_is_urgent(conn: sqlite3.Connection, settings: Settings) -> bool:
     return now.time() >= parse_hhmm(settings.imap_urgent_after)
 
 
-async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> None:
+async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) -> bool:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         log.debug("IMAP poll: пропуск — в .env не заданы host/user/password")
-        return
+        return False
     log.info(
         "IMAP poll: загрузка вложений (host=%s port=%s user=%s only_unseen=%s)",
         settings.imap_host,
@@ -219,10 +220,11 @@ async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) ->
         )
     except Exception as e:  # noqa: BLE001
         log.warning("IMAP poll: ошибка при получении писем: %s", e, exc_info=True)
-        return
+        return False
 
     today = local_today(settings.tz)
     log.info("IMAP poll: получено вложений .docx для разбора: %s (дата меню: %s)", len(atts), today)
+    menu_updated = False
     for att in atts:
         if db.is_email_processed(conn, att.message_id):
             log.info("IMAP poll: письмо уже обработано, пропуск: %s (%s)", att.message_id, att.filename)
@@ -238,11 +240,38 @@ async def process_imap_and_menu(conn: sqlite3.Connection, settings: Settings) ->
             continue
         db.create_menu(conn, today, "imap", items)
         db.mark_email_processed(conn, att.message_id)
+        menu_updated = True
         log.info("IMAP poll: меню на %s обновлено из %s, позиций: %s", today, att.filename, len(items))
+    return menu_updated
+
+
+async def _notify_new_menu_available(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
+    today = local_today(settings.tz)
+    if db.was_menu_broadcast(conn, today):
+        return
+    if not db.get_app_setting_bool(conn, MENU_NOTIFY_SETTING_KEY, True):
+        log.info("Late menu notification: выключено админом (key=%s)", MENU_NOTIFY_SETTING_KEY)
+        return
+    recipients = collect_menu_broadcast_recipients(conn, settings)
+    if not recipients:
+        return
+    text = (
+        "Новое меню на сегодня загружено.\n"
+        "Откройте «Заказ на сегодня», чтобы выбрать блюда."
+    )
+    ok, errs = await _send_bulk(bot, recipients, text, employee_main_kb())
+    db.mark_menu_broadcast(conn, today)
+    log.info("Late menu notification: доставлено %s/%s", ok, len(recipients))
+    if errs:
+        log.warning("Late menu notification: ошибок %s", len(errs))
 
 
 async def process_imap_scheduled(
-    conn: sqlite3.Connection, settings: Settings, *, urgent_only: bool
+    bot: Bot,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    urgent_only: bool,
 ) -> None:
     if not (settings.imap_host and settings.imap_user and settings.imap_password):
         return
@@ -273,7 +302,9 @@ async def process_imap_scheduled(
         )
         return
     log.info("IMAP job (urgent_only=%s): запуск process_imap_and_menu", urgent_only)
-    await process_imap_and_menu(conn, settings)
+    updated = await process_imap_and_menu(conn, settings)
+    if updated:
+        await _notify_new_menu_available(bot, conn, settings)
 
 
 async def broadcast_weekday_menu(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> None:
@@ -576,7 +607,7 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
     sched.add_job(
         process_imap_scheduled,
         IntervalTrigger(minutes=3),
-        args=[conn, settings],
+        args=[bot, conn, settings],
         kwargs={"urgent_only": True},
         id="imap_urgent",
         replace_existing=True,
@@ -584,7 +615,7 @@ def setup_scheduler(bot: Bot, conn: sqlite3.Connection, settings: Settings) -> A
     sched.add_job(
         process_imap_scheduled,
         IntervalTrigger(minutes=15),
-        args=[conn, settings],
+        args=[bot, conn, settings],
         kwargs={"urgent_only": False},
         id="imap_slow",
         replace_existing=True,

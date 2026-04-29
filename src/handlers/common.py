@@ -35,6 +35,7 @@ def employee_main_kb() -> ReplyKeyboardMarkup:
 def admin_main_kb(settings: Settings) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = [
         [KeyboardButton(text="Админ-панель")],
+        [KeyboardButton(text="Настройки уведомлений")],
         [KeyboardButton(text="Список сотрудников")],
         [KeyboardButton(text="Загрузить меню")],
         [KeyboardButton(text="Месячный отчёт")],

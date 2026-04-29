@@ -100,6 +100,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
             reminder_date TEXT PRIMARY KEY,
             sent_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         """
     )
     cols = {
@@ -670,6 +677,36 @@ def mark_draft_cart_pre_deadline_reminder_sent(conn: sqlite3.Connection, d: date
         )
 
 
+def get_app_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else None
+
+
+def set_app_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              value = excluded.value,
+              updated_at = excluded.updated_at
+            """,
+            (key, value, datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+
+
+def get_app_setting_bool(conn: sqlite3.Connection, key: str, default: bool) -> bool:
+    raw = get_app_setting(conn, key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def set_app_setting_bool(conn: sqlite3.Connection, key: str, value: bool) -> None:
+    set_app_setting(conn, key, "1" if value else "0")
+
+
 def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
     """
     Полный сброс рабочих данных бота (как "новая" база без миграций):
@@ -687,3 +724,4 @@ def reset_all_runtime_data(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM canteen_summaries_sent")
         conn.execute("DELETE FROM pre_deadline_reminders_sent")
         conn.execute("DELETE FROM draft_cart_pre_deadline_reminders_sent")
+        conn.execute("DELETE FROM app_settings")
