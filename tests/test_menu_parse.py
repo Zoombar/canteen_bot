@@ -324,3 +324,32 @@ def test_parse_docx_table_keeps_comma_lists_split() -> None:
     assert ("сгущенное молоко", 10.0) in pairs
     assert ("гренки", 10.0) in pairs
     assert ("гренки 20", 10.0) not in pairs
+
+
+def test_parse_docx_table_name_plus_kbju_plus_price_cells() -> None:
+    doc = Document()
+    table = doc.add_table(rows=2, cols=5)
+    table.cell(0, 0).text = "Компот , кисель, каркадэ"
+    table.cell(0, 1).text = "55,2"
+    table.cell(0, 2).text = "0,06"
+    table.cell(0, 3).text = "0,02"
+    table.cell(0, 4).text = "30,00"
+
+    table.cell(1, 0).text = "Кетчуп, масло, сметана, майонез, сгущенное молоко, гренки 20"
+    table.cell(1, 1).text = "3,77"
+    table.cell(1, 2).text = "8,77"
+    table.cell(1, 3).text = "25,14"
+    table.cell(1, 4).text = "10,00"
+
+    items = _parse_docx_document(doc)
+    pairs = {(name, price) for name, price, _ in items}
+
+    assert ("Компот", 30.0) in pairs
+    assert ("кисель", 30.0) in pairs
+    assert ("каркадэ", 30.0) in pairs
+    assert ("Кетчуп", 10.0) in pairs
+    assert ("масло", 10.0) in pairs
+    assert ("сметана", 10.0) in pairs
+    assert ("майонез", 10.0) in pairs
+    assert ("сгущенное молоко", 10.0) in pairs
+    assert ("гренки", 10.0) in pairs

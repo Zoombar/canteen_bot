@@ -263,7 +263,12 @@ def _split_name_and_trailing_number_token(name: str) -> tuple[str, int | None]:
 
 
 def _has_explicit_price_marker(text: str) -> bool:
-    return bool(_EXPLICIT_RUB_TOKEN_RE.search(text) or re.search(r"\d+-\d{1,2}", text))
+    return bool(
+        _EXPLICIT_RUB_TOKEN_RE.search(text)
+        or re.search(r"\d+-\d{1,2}", text)
+        or "₽" in text
+        or re.search(r"[—–-]\s*\d+(?:[.,]\d{1,2})?", text)
+    )
 
 
 def split_multi_comma_price_line(line: str) -> list[tuple[str, float]] | None:
@@ -493,6 +498,10 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
                 parsed = _parse_line(cell)
                 if parsed is None:
                     continue
+                # В таблицах часто есть "название ... 20" (граммовка) без маркера цены.
+                # Такие ячейки не считаем полноценными "название+цена".
+                if not _has_explicit_price_marker(cell):
+                    continue
                 name, price = parsed
                 if name and price is not None:
                     parsed_cells.append((name, price))
@@ -508,6 +517,28 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
                         continue
                     lines.append(cell)
                 continue
+
+            # Частый формат столбцов DOCX: [название блюда][ккал/бжу...][цена].
+            # Если в строке ровно одна "текстовая" ячейка с названием и отдельная
+            # числовая ячейка цены, собираем синтетическую строку с явным маркером
+            # цены, чтобы затем корректно сработал split списков через запятую.
+            name_cells = [c for c in cells if re.search(r"[A-Za-zА-Яа-яЁё]", c)]
+            if len(parsed_cells) == 0 and name_cells:
+                price_candidates: list[float] = []
+                for cell in cells:
+                    p = _parse_price_token(cell)
+                    if p is None:
+                        continue
+                    if 5 <= p <= 1000:
+                        price_candidates.append(p)
+                if price_candidates:
+                    name_cell = max(
+                        name_cells,
+                        key=lambda c: len(re.findall(r"[A-Za-zА-Яа-яЁё]", c)),
+                    ).strip()
+                    price = price_candidates[-1]
+                    lines.append(f"{name_cell} — {price:.2f} ₽")
+                    continue
 
             price = _parse_price_token(cells[-1] if cells else "")
             if len(cells) >= 2 and price is not None:
