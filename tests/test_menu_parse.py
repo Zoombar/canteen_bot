@@ -10,6 +10,7 @@ from src.menu_parse import (
     parse_docx_bytes,
     sanitize_dish_name,
     strip_calories_from_dish_name,
+    _parse_docx_document,
 )
 
 
@@ -264,3 +265,41 @@ def test_comma_list_volume_with_decimal_comma_not_split() -> None:
     assert ("Компот", 90.0) in cleaned
     assert ("кисель 0,5", 90.0) in cleaned
     assert all(p == 90.0 for _, p in cleaned)
+
+
+def test_single_price_comma_list_strips_trailing_weight_in_long_list() -> None:
+    line = "Кетчуп, масло, сметана, майонез, , сгущенное молоко, гренки 20 — 10.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("гренки", 10.0) in cleaned
+    assert ("гренки 20", 10.0) not in cleaned
+
+
+def test_single_price_comma_list_splits_beverages() -> None:
+    line = "Компот , кисель, каркадэ — 30.00 ₽"
+    items, multi = _parse_one_line_to_items(line)
+    assert multi is True
+    cleaned = [(sanitize_dish_name(n), p) for n, p in items]
+    assert ("Компот", 30.0) in cleaned
+    assert ("кисель", 30.0) in cleaned
+    assert ("каркадэ", 30.0) in cleaned
+
+
+def test_parse_docx_recovers_price_from_split_nutrition_row() -> None:
+    doc = Document()
+    # Эмуляция оборванной строки из DOCX, когда КБЖУ попадает в отдельную строку.
+    doc.add_paragraph("Щи со сметаной 250 65,9 2")
+    doc.add_paragraph("1,9 9,3 70")
+
+    items = _parse_docx_document(doc)
+    pairs = {(name, price) for name, price, _ in items}
+    assert ("Щи со сметаной", 70.0) in pairs
+    assert all(not name.startswith("1,9 9,3") for name, _price in pairs)
+
+
+def test_parse_docx_strips_leading_category_phrase() -> None:
+    doc = Document()
+    doc.add_paragraph("Первые блюда Окрошка на квасе со сметаной 120")
+    items = _parse_docx_document(doc)
+    assert ("Окрошка на квасе со сметаной", 120.0, "other") in items

@@ -84,6 +84,9 @@ def strip_nutrition_table_tail(name: str) -> str:
     removed = len(parts) - i
     if removed >= 4:
         return " ".join(parts[:i]).strip()
+    # Частый шум из DOCX: "... 250 65,9" (вес + ккал) в хвосте названия.
+    if removed >= 2 and any(re.fullmatch(r"\d+[,.]\d+", p) for p in parts[i:]):
+        return " ".join(parts[:i]).strip()
     return name
 
 
@@ -147,6 +150,10 @@ _CATEGORY_PREFIXES_MULTI = frozenset(
     }
 )
 _CATEGORY_PREFIXES_SINGLE = frozenset({"выпечка", "гарниры", "напитки"})
+_CATEGORY_PHRASE_RE = re.compile(
+    r"^\s*(?:первые блюда|вторые блюда|первые|вторые)\s+",
+    re.IGNORECASE,
+)
 
 _DASH_PRICE_IN_LINE_RE = re.compile(r"(?<!\S)(\d+-\d{1,2})(?!\S)")
 
@@ -160,6 +167,10 @@ def _maybe_strip_category_prefix(name: str, *, multi_item_line: bool) -> str:
     if first in allowed:
         return " ".join(parts[1:]).strip()
     return name
+
+
+def _strip_leading_category_phrase(name: str) -> str:
+    return _CATEGORY_PHRASE_RE.sub("", name).strip()
 
 
 def split_multi_price_line(line: str) -> list[tuple[str, float]] | None:
@@ -382,6 +393,7 @@ def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | N
     out: list[tuple[str, float]] = []
     part_count = len(cleaned_parts)
     for i, p in enumerate(cleaned_parts):
+        raw_base, raw_trailing_num = _split_name_and_trailing_number_token(p)
         parsed = _parse_line(p)
         if parsed is None:
             out.append((p, price))
@@ -394,15 +406,15 @@ def split_comma_list_with_single_price(line: str) -> list[tuple[str, float]] | N
             continue
 
         # Голое число в конце части (например "гренки 20") часто означает граммовку.
-        base_name, trailing_num = _split_name_and_trailing_number_token(p)
-        if trailing_num is not None:
+        # Голое число в конце части (например "гренки 20") часто означает граммовку.
+        if raw_trailing_num is not None:
             # Для коротких списков чаще всего это именно отдельная цена позиции:
             # "Хот-дог 80, Сочень — 50.00 ₽".
             if part_count <= 3:
                 out.append((own_name, own_price))
                 continue
             # Для длинных списков при общей цене в конце считаем это весом/граммовкой.
-            out.append((base_name, price))
+            out.append((raw_base, price))
             continue
 
         out.append((p, price))
@@ -500,13 +512,25 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
 
     out: list[tuple[str, float, DishKind]] = []
     seen: set[tuple[str, str]] = set()
+    pending_price_fix_idx: int | None = None
     for line in lines:
         raw_items, multi_dash = _parse_one_line_to_items(line)
-        for name, price in raw_items:
-            name = sanitize_dish_name(name)
+        for raw_name, price in raw_items:
+            name = sanitize_dish_name(raw_name)
             name = _maybe_strip_category_prefix(name, multi_item_line=multi_dash)
+            name = _strip_leading_category_phrase(name)
             name = sanitize_dish_name(name)
             if not name:
+                continue
+            has_letters = bool(re.search(r"[A-Za-zА-Яа-яЁё]", name))
+            if not has_letters:
+                # DOCX иногда рвёт строку КБЖУ на "1,9 9,3 — 70.00":
+                # считаем это шумом и, если перед ним был подозрительно дешёвый суп/блюдо,
+                # берём отсюда цену как финальную.
+                if pending_price_fix_idx is not None and 10 <= price <= 500:
+                    prev_name, _prev_price, prev_kind = out[pending_price_fix_idx]
+                    out[pending_price_fix_idx] = (prev_name, price, prev_kind)
+                pending_price_fix_idx = None
                 continue
             key = (name.casefold(), f"{price:.4f}")
             if key in seen:
@@ -514,6 +538,12 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
             seen.add(key)
             kind = classify_dish(name)
             out.append((name, price, kind))
+            # Цена 1-5 руб. для основных блюд почти всегда означает, что парсер схватил
+            # "белки/жиры" вместо цены, а реальная цена стоит в следующей оборванной строке.
+            if price <= 5 and re.search(r"\d", raw_name):
+                pending_price_fix_idx = len(out) - 1
+            else:
+                pending_price_fix_idx = None
     return out
 
 
