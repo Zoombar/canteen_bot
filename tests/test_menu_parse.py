@@ -303,3 +303,24 @@ def test_parse_docx_strips_leading_category_phrase() -> None:
     doc.add_paragraph("Первые блюда Окрошка на квасе со сметаной 120")
     items = _parse_docx_document(doc)
     assert ("Окрошка на квасе со сметаной", 120.0, "other") in items
+
+
+def test_parse_docx_table_keeps_comma_lists_split() -> None:
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Компот , кисель, каркадэ — 30.00 ₽"
+    table.cell(0, 1).text = "Кетчуп, масло, сметана, майонез, сгущенное молоко, гренки 20 — 10.00 ₽"
+
+    items = _parse_docx_document(doc)
+    pairs = {(name, price) for name, price, _ in items}
+
+    assert ("Компот", 30.0) in pairs
+    assert ("кисель", 30.0) in pairs
+    assert ("каркадэ", 30.0) in pairs
+    assert ("Кетчуп", 10.0) in pairs
+    assert ("масло", 10.0) in pairs
+    assert ("сметана", 10.0) in pairs
+    assert ("майонез", 10.0) in pairs
+    assert ("сгущенное молоко", 10.0) in pairs
+    assert ("гренки", 10.0) in pairs
+    assert ("гренки 20", 10.0) not in pairs

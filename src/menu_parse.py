@@ -498,8 +498,15 @@ def _parse_docx_document(doc: Document) -> list[tuple[str, float, DishKind]]:
                     parsed_cells.append((name, price))
 
             if len(parsed_cells) >= 2:
-                for name, price in parsed_cells:
-                    lines.append(f"{name} {price}")
+                # Важно сохранять исходный текст ячейки, иначе можно потерять
+                # явные маркеры цены (—, ₽, руб.) и сломать разбор списков:
+                # "Компот, кисель, каркадэ — 30.00 ₽".
+                for cell in cells:
+                    if not re.search(r"[A-Za-zА-Яа-яЁё]", cell):
+                        continue
+                    if _parse_line(cell) is None:
+                        continue
+                    lines.append(cell)
                 continue
 
             price = _parse_price_token(cells[-1] if cells else "")
